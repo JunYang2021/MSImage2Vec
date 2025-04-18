@@ -356,7 +356,7 @@ def train_embedding(inputs: List, model: nn.Module, args) -> Tuple[List[float], 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs} [Train]")
         for img1, img2, corr in pbar:
             img1, img2, corr = img1.to(device), img2.to(device), corr.to(device)
-
+            print(img1.shape)
             optimizer.zero_grad()
 
             # Forward pass
@@ -416,10 +416,10 @@ if __name__ == "__main__":
         lr = 1e-4
         epochs = 30
         batch_size = 200
-        train_pairs_per_sample = 20000
+        train_pairs_per_sample = 500
         test_pairs_per_sample = 200
         margin = 0.1
-        embedding_dim = 32
+        embedding_dim = 8
         output_path = './test_mice_brain_aging'
 
 
