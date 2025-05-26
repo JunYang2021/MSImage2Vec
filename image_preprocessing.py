@@ -13,7 +13,7 @@ def pre_alignment(inputs, sample_transform):
         '90'    : Rotate counterclockwise by 90 degrees
         '180'   : Rotate counterclockwise by 180 degrees
         '270'   : Rotate counterclockwise by 270 degrees
-        'f': Flip
+        'f': Flip horizontally
         'f90'   : Flip horizontally and rotate counterclockwise by 90 degrees
         'f180'  : Flip horizontally and rotate counterclockwise by 180 degrees
         'f270'  : Flip horizontally and rotate counterclockwise by 270 degrees
@@ -69,7 +69,7 @@ def input_normalization(inputs):
     return inputs
 
 
-def get_input_size(inputs):
+def get_input_size(inputs, patch_size=None):
     """
 
     :param inputs: list of data of all samples.
@@ -80,6 +80,13 @@ def get_input_size(inputs):
     for s_input in inputs:
         input_height = max(input_height, s_input[3].shape[1])
         input_width = max(input_width, s_input[3].shape[2])
+
+    if patch_size is not None:
+        def round_up(x, size):
+            return ((x + size - 1) // size) * size
+
+        input_height = round_up(input_height, patch_size)
+        input_width = round_up(input_width, patch_size)
     return input_height, input_width
 
 

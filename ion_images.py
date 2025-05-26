@@ -62,9 +62,14 @@ def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_p
                         closest_item.iimage[y - y_minus, x - x_minus] = i
                         closest_item.real_points += 1
                     else:
-                        closest_item.mzimage[y - y_minus, x - x_minus] = (closest_item.mzimage[y - y_minus, x - x_minus] * closest_item.iimage[
-                            y - y_minus, x - x_minus] + m * i) / (closest_item.iimage[y - y_minus, x - x_minus] + i)
-                        closest_item.iimage[y - y_minus, x - x_minus] = closest_item.iimage[y - y_minus, x - x_minus] + i
+                        closest_item.mzimage[y - y_minus, x - x_minus] = (closest_item.mzimage[
+                                                                              y - y_minus, x - x_minus] *
+                                                                          closest_item.iimage[
+                                                                              y - y_minus, x - x_minus] + m * i) / (
+                                                                                     closest_item.iimage[
+                                                                                         y - y_minus, x - x_minus] + i)
+                        closest_item.iimage[y - y_minus, x - x_minus] = closest_item.iimage[
+                                                                            y - y_minus, x - x_minus] + i
 
     total_pixels = idx + 1
     final_ions = []
@@ -73,6 +78,37 @@ def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_p
             ion.mzmean = np.sum(ion.mzimage * ion.iimage) / np.sum(ion.iimage)
             final_ions.append(ion)
     return final_ions, mask
+
+
+def extract_ion_images(msi_parser: ImzMLParser, target_mz, resolution):
+    # Max intensity of an image should be greater than noise_threshold
+    coord = np.array(msi_parser.coordinates)
+    width = coord[:, 0].max() - coord[:, 0].min() + 1
+    height = coord[:, 1].max() - coord[:, 1].min() + 1
+    x_minus = coord[:, 0].min()
+    y_minus = coord[:, 1].min()
+    mask = np.zeros((height, width), dtype=bool)
+
+    L = len(msi_parser.coordinates)
+
+    tar_ion_image = IonImage(target_mz, width, height)
+    delta_mz = resolution / (10 ** 6) * target_mz
+    for idx, (x, y, _) in enumerate(tqdm(msi_parser.coordinates, total=L, desc="Processing coordinates")):
+        for m, i in zip(*msi_parser.getspectrum(idx)):
+            if target_mz - delta_mz < m < target_mz + delta_mz:
+                if tar_ion_image.iimage[y - y_minus, x - x_minus] == 0:
+                    tar_ion_image.mzimage[y - y_minus, x - x_minus] = m
+                    tar_ion_image.iimage[y - y_minus, x - x_minus] = i
+                    tar_ion_image.real_points += 1
+                else:
+                    tar_ion_image.mzimage[y - y_minus, x - x_minus] = (tar_ion_image.mzimage[y - y_minus, x - x_minus] *
+                                                                       tar_ion_image.iimage[
+                                                                           y - y_minus, x - x_minus] + m * i) / (
+                                                                              tar_ion_image.iimage[
+                                                                                  y - y_minus, x - x_minus] + i)
+                    tar_ion_image.iimage[y - y_minus, x - x_minus] = tar_ion_image.iimage[y - y_minus, x - x_minus] + i
+    tar_ion_image.mzmean = np.sum(tar_ion_image.mzimage * tar_ion_image.iimage) / np.sum(tar_ion_image.iimage)
+    return tar_ion_image
 
 
 def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, noise_threshold, blank_pixels_percent,
@@ -122,7 +158,7 @@ def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, nois
 
         # Save inputs to a file in output_directory
         mz_array = np.array([i.mzmean for i in ions])
-        intensity_array = np.array([i.iimage for i in ions])   # shape: # images, height, width
+        intensity_array = np.array([i.iimage for i in ions])  # shape: # images, height, width
         print(msi_mask.shape, mz_array.shape, intensity_array.shape)
         inputs.append([sample_id, msi_mask, mz_array, intensity_array])
 
@@ -131,8 +167,35 @@ def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, nois
         pickle.dump(inputs, f)
 
 
+def extract_sample_ion_image(sample_path_list, sample_id_list, target_mz, ppm_torelance):
+    num_samples = len(sample_path_list)
+    num_rows = int(np.ceil(num_samples / 5))
+    fig, axes = plt.subplots(num_rows, 5, figsize=(20, 4 * num_rows))
+
+    # Flatten axes array for easy iteration
+    if num_rows > 1:
+        axes = axes.flatten()
+    else:
+        axes = [axes] if num_samples == 1 else axes
+
+    for i, (sample_id, sample_path) in enumerate(zip(sample_id_list, sample_path_list)):
+        print(f'Obtaining ion images from {sample_id}...')
+        msi_data = ImzMLParser(sample_path)
+        tar_image = extract_ion_images(msi_data, target_mz, ppm_torelance)
+
+        tar_image.plot(ax=axes[i])
+        axes[i].set_title(f'{sample_id}\nm/z: {target_mz:.4f}')
+
+    # Hide any unused axes
+    for j in range(i + 1, len(axes)):
+        axes[j].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+
 if __name__ == '__main__':
-    sample_path_list = [r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M14d-pos.imzML',
+    """sample_path_list = [r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M14d-pos.imzML',
                         r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M14d-neg.imzML',
                         r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M3m-pos.imzML',
                         r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M3m-neg.imzML'
@@ -145,5 +208,52 @@ if __name__ == '__main__':
                            ppm_torelance=10,
                            noise_threshold=100,
                            blank_pixels_percent=0.2,
-                           output_directory=output_dir)
+                           output_directory=output_dir)"""
 
+    # Evaluation 1: Integration of different samples
+    # sample_path_list = [
+    #     r'E:\yangjun\msi\ad_msi\M14d-pos.imzML',
+    #     r'E:\yangjun\msi\ad_msi\M1m-pos.imzML',
+    #     r'E:\yangjun\msi\ad_msi\M2m-pos.imzML',
+    #     r'E:\yangjun\msi\ad_msi\M3m-pos.imzML',
+    #     r'E:\yangjun\msi\ad_msi\M1_5m-pos.imzML'
+    # ]
+    # sample_path_list = [
+    #     r'E:\yangjun\msi\ad_msi\raw_data\M14d-pos.imzML',
+    #     r'E:\yangjun\msi\ad_msi\raw_data\M1m-pos.imzML',
+    #     r'E:\yangjun\msi\ad_msi\raw_data\M2m-pos.imzML',
+    #     r'E:\yangjun\msi\ad_msi\raw_data\M3m-pos.imzML',
+    #     r'E:\yangjun\msi\ad_msi\raw_data\M1_5m-pos.imzML'
+    # ]
+    # sample_id_list = ['14d_pos', '1m_pos', '2m_pos', '3m_pos', '5m_pos']
+    # output_dir = r'E:\yangjun\msi\MSI_IIE_article\test_five_samples'
+
+    # get_samples_ion_images(sample_path_list=sample_path_list,
+    #                        sample_id_list=sample_id_list,
+    #                        ppm_torelance=10,
+    #                        noise_threshold=100,
+    #                        blank_pixels_percent=0.3,
+    #                        output_directory=output_dir)
+    # extract_sample_ion_image(sample_path_list=sample_path_list,
+    #                          sample_id_list=sample_id_list,
+    #                          target_mz=369.34424,
+    #                          ppm_torelance=10)
+
+    # Evaluation 2: Integration of different ion modes
+    sample_path_list = [
+        r'E:\yangjun\msi\msi_open_data\metaspace-mcf\2025_03_18_mcf_pos-total ion count.imzML',
+        r'E:\yangjun\msi\msi_open_data\metaspace-mcf\2025_03_17_mcf_neg_lpval-total ion count.imzML'
+    ]
+    sample_id_list = ['mcf-pos', 'mcf-neg']
+    output_dir = r'E:\yangjun\msi\MSI_IIE_article\test_mcf_pos_neg'
+
+    # get_samples_ion_images(sample_path_list=sample_path_list,
+    #                        sample_id_list=sample_id_list,
+    #                        ppm_torelance=10,
+    #                        noise_threshold=500,
+    #                        blank_pixels_percent=0.3,
+    #                        output_directory=output_dir)
+    extract_sample_ion_image(sample_path_list=sample_path_list,
+                             sample_id_list=sample_id_list,
+                             target_mz=516.2848,
+                             ppm_torelance=5)
