@@ -6,6 +6,7 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from typing import List, Tuple
 from scipy.ndimage import gaussian_filter, map_coordinates
+from scipy.stats import spearmanr
 
 import cv2
 from tqdm import tqdm
@@ -55,8 +56,9 @@ def _correlation(img1: np.ndarray, img2: np.ndarray, mask: np.ndarray) -> float:
     """Calculate Pearson correlation between two images"""
     flat1 = img1[mask].flatten()
     flat2 = img2[mask].flatten()
-    return np.corrcoef(flat1, flat2)[0, 1]
-
+    # return np.corrcoef(flat1, flat2)[0, 1]
+    corr, _ = spearmanr(flat1, flat2)
+    return corr
 
 def _image_distort(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     distorted = img.copy()
@@ -89,26 +91,26 @@ def _image_distort(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
         distorted = map_coordinates(distorted, [y_distorted, x_distorted], order=1, mode='constant')
 
-    # 3. Random rotation (-15 to 15 degrees) and scaling (95% to 105%)
+    # 3. Random rotation (-45 to 45 degrees) and scaling (90% to 110%)
     angle = random.uniform(-15, 15)
-    angle = random.uniform(-30, 30)
+    angle = random.uniform(-45, 45)
     center = (width // 2, height // 2)
-    scale = random.uniform(0.95, 1.05)
+    scale = random.uniform(0.90, 1.1)
     M = cv2.getRotationMatrix2D(center, angle, scale)
     distorted = cv2.warpAffine(distorted, M, (width, height),
                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
-    # 4. Random translation (up to 5% of image size)
-    max_trans_x = int(0.05 * width)
-    max_trans_y = int(0.05 * height)
+    # 4. Random translation (up to 10% of image size)
+    max_trans_x = int(0.1 * width)
+    max_trans_y = int(0.1 * height)
     trans_x = random.randint(-max_trans_x, max_trans_x)
     trans_y = random.randint(-max_trans_y, max_trans_y)
     M = np.float32([[1, 0, trans_x], [0, 1, trans_y]])
     distorted = cv2.warpAffine(distorted, M, (width, height),
                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
-    # 5. Random pixel dropout(1 % of pixels)
-    dropout_mask = np.random.random((height, width)) < 0.01
+    # 5. Random pixel dropout(5 % of pixels)
+    dropout_mask = np.random.random((height, width)) < 0.05
     distorted[dropout_mask] = 0
 
     return distorted
@@ -149,7 +151,7 @@ class ImageDataset(Dataset):
 
 class TripletImageDataset(Dataset):
     def __init__(self, inputs: List, triplets_per_sample: int = 20000):
-        self.triplets = []
+        """self.triplets = []
         for s_input in inputs:
             sample_id, shape_mask, _, intensity_array = s_input
             num_images = len(intensity_array)
@@ -176,13 +178,47 @@ class TripletImageDataset(Dataset):
                 anchor_img = _image_distort(img1, shape_mask)
                 pos_img = _image_distort(pos_img, shape_mask)
                 neg_img = _image_distort(neg_img, shape_mask)
-                self.triplets.append((anchor_img, pos_img, neg_img, corr_ap, corr_an))
+                self.triplets.append((anchor_img, pos_img, neg_img, corr_ap, corr_an))"""
+        self.inputs = inputs
+        self.triplets_per_sample = triplets_per_sample
+        self.total_triplets = len(inputs) * triplets_per_sample
+        print('Use Spearman correlation as training goal.')
 
     def __len__(self) -> int:
-        return len(self.triplets)
+        return self.total_triplets
 
     def __getitem__(self, idx: int):
-        anchor_img, pos_img, neg_img, corr_ap, corr_an = self.triplets[idx]
+        """anchor_img, pos_img, neg_img, corr_ap, corr_an = self.triplets[idx]
+
+        to_tensor = lambda img: torch.FloatTensor(img).unsqueeze(0)
+        return (
+            to_tensor(anchor_img),
+            to_tensor(pos_img),
+            to_tensor(neg_img),
+            torch.tensor(corr_ap, dtype=torch.float32),
+            torch.tensor(corr_an, dtype=torch.float32)
+        )"""
+        sample_idx = idx // self.triplets_per_sample
+        s_input = self.inputs[sample_idx]
+        sample_id, shape_mask, _, intensity_array = s_input
+
+        num_images = len(intensity_array)
+        i1, i2, i3 = random.sample(range(num_images), 3)
+        img1, img2, img3 = intensity_array[i1], intensity_array[i2], intensity_array[i3]
+
+        corr12 = _correlation(img1, img2, shape_mask)
+        corr13 = _correlation(img1, img3, shape_mask)
+
+        if corr12 >= corr13:
+            pos_img, neg_img = img2, img3
+            corr_ap, corr_an = corr12, corr13
+        else:
+            pos_img, neg_img = img3, img2
+            corr_ap, corr_an = corr13, corr12
+
+        anchor_img = _image_distort(img1, shape_mask)
+        pos_img = _image_distort(pos_img, shape_mask)
+        neg_img = _image_distort(neg_img, shape_mask)
 
         to_tensor = lambda img: torch.FloatTensor(img).unsqueeze(0)
         return (
@@ -254,7 +290,8 @@ class Animator:
             self.axes[0], xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
         self.X, self.Y, self.fmts = None, None, fmts
         plt.ion()
-        self.fig.show()
+        # self.fig.show()
+        plt.show()
 
     def add(self, x, y):
         if not hasattr(y, "__len__"):
@@ -282,6 +319,7 @@ class Animator:
         self.config_axes()
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
+        plt.pause(0.1)
 
 
 def set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend):
@@ -296,7 +334,8 @@ def set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend):
     axes.grid()
 
 
-def train_embedding(inputs: List, model: nn.Module, args) -> Tuple[List[float], List[float]]:
+def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
+    list[float], list[float], list[float], list[float], list[float], list[float]]:
     """Train the embedding model
 
     Args:
@@ -431,12 +470,12 @@ def train_embedding(inputs: List, model: nn.Module, args) -> Tuple[List[float], 
     plt.ioff()
     plt.show()
 
-    return train_loss_log, test_loss_log
+    return train_loss_log, test_loss_log, train_reg_log, test_reg_log, train_rank_log, test_rank_log
 
 
 # Example usage
 if __name__ == "__main__":
-    """import pickle
+    r"""import pickle
     import time
 
     with open('./test_mice_brain_aging/input_data.pkl', 'rb') as f:
@@ -535,7 +574,7 @@ if __name__ == "__main__":
 
 
     # Test in mcf-pos-neg
-    import pickle
+    r"""import pickle
 
     with open(r'E:\yangjun\msi\MSI_IIE_article\test_mcf_pos_neg\input_data.pkl', 'rb') as f:
         inputs = pickle.load(f)
@@ -574,4 +613,112 @@ if __name__ == "__main__":
 
     # Train the model
 
+    train_losses, test_losses = train_embedding(inputs_after, model, args)"""
+
+    r"""# Evaluation: application on ad data
+    import pickle
+
+    with open(r'E:\yangjun\msi\MSI_IIE_article\ad_study\input_data.pkl', 'rb') as f:
+        inputs = pickle.load(f)
+
+    class Args:
+        seed = 42
+        lr = 1e-4
+        epochs = 40
+        batch_size = 200
+        train_pairs_per_sample = 8000
+        test_pairs_per_sample = 1000
+        embedding_dim = 32
+        output_path = r'E:\yangjun\msi\MSI_IIE_article\ad_study'
+        model_data_file = 'multiscale_cnn_32d_ad.pth'
+
+
+    args = Args()
+
+    from image_preprocessing import *
+
+    inputs_after = pre_alignment(inputs, sample_transform=['i', 'f', 'i', 'i', 'f',
+                                                           'i', 'i', 'i', 'i', 'f',
+                                                           'i', 'f', 'i', 'i', 'f',
+                                                           'i', 'i', 'i', 'i', 'f'])
+    inputs_after = input_normalization(inputs_after)
+    ih, iw = get_input_size(inputs_after)
+    inputs_after = resize_images(inputs_after, ih, iw)
+    print('Preprocessing finishing.')
+
+    # Initialize model
+    # model = ResNetEmbedding(embedding_dim=args.embedding_dim)
+    # model = ViTEmbedding(embedding_dim=args.embedding_dim, img_size=(ih, iw), patch_size=args.patch_size,
+    #                      dim=64, depth=1, heads=4, mlp_dim=28, dropout=0.1)
+    # model = LightViTEmbedding()
+    # model = EfficientNetEmbedding(embedding_dim=args.embedding_dim)
+    # model = SimpleCNNEmbedding(embedding_dim=args.embedding_dim)
+    model = MultiscaleEmbedding(embedding_dim=args.embedding_dim)
+
+    # Train the model
+
+    train_losses, test_losses = train_embedding(inputs_after, model, args)"""
+
+    r"""# Evaluation: application on maldi-pre data
+    import pickle
+
+    with open(r'E:\yangjun\msi\MSI_IIE_article\maldi_pre_experiment\input_data.pkl', 'rb') as f:
+        inputs = pickle.load(f)
+
+
+    class Args:
+        seed = 42
+        lr = 1e-4
+        epochs = 40
+        batch_size = 200
+        train_pairs_per_sample = 8000
+        test_pairs_per_sample = 1000
+        embedding_dim = 32
+        output_path = r'E:\yangjun\msi\MSI_IIE_article\maldi_pre_experiment'
+        model_data_file = 'multiscale_cnn_32d_ad.pth'
+
+
+    args = Args()
+
+    from image_preprocessing import *
+
+    inputs_after = pre_alignment(inputs, sample_transform=['f180', 'f180', 'i', 'i'], output_path=args.output_path)
+    inputs_after = input_normalization(inputs_after)
+    ih, iw = get_input_size(inputs_after)
+    inputs_after = resize_images(inputs_after, ih, iw)
+    print('Preprocessing finishing.')
+
+    model = MultiscaleEmbedding(embedding_dim=args.embedding_dim)
+    train_losses, test_losses = train_embedding(inputs_after, model, args)"""
+
+    # Evaluation: application on ad whole brain preexperiment data
+    import pickle
+
+    with open(r'E:\yangjun\msi\MSI_IIE_article\ad_whole_brain_pre\input_data.pkl', 'rb') as f:
+        inputs = pickle.load(f)
+
+
+    class Args:
+        seed = 42
+        lr = 1e-4
+        epochs = 40
+        batch_size = 200
+        train_pairs_per_sample = 8000
+        test_pairs_per_sample = 1000
+        embedding_dim = 32
+        output_path = r'E:\yangjun\msi\MSI_IIE_article\ad_whole_brain_pre'
+        model_data_file = 'multiscale_cnn_32d_ad.pth'
+
+
+    args = Args()
+
+    from image_preprocessing import *
+
+    inputs_after = pre_alignment(inputs, sample_transform=['i', 'i', 'i', 'i'], output_path=args.output_path)
+    inputs_after = input_normalization(inputs_after)
+    ih, iw = get_input_size(inputs_after)
+    inputs_after = resize_images(inputs_after, ih, iw)
+    print(f'Preprocessing finishing. ({ih}, {iw})')
+
+    model = MultiscaleEmbedding(embedding_dim=args.embedding_dim)
     train_losses, test_losses = train_embedding(inputs_after, model, args)

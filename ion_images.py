@@ -1,5 +1,5 @@
 import numpy as np
-from pyimzml.ImzMLParser import ImzMLParser, getionimage
+from pyimzml.ImzMLParser import ImzMLParser
 from BTrees.OOBTree import OOBTree
 import matplotlib.pyplot as plt
 import os
@@ -13,6 +13,7 @@ class IonImage:
         self.iimage = np.zeros((height, width), dtype=np.float32)
         self.mzmean = mz
         self.real_points = 1
+        self.compound = None
 
     def plot(self, ax=None):
         if ax is None:
@@ -31,7 +32,9 @@ class IonImage:
             plt.colorbar(im, ax=ax)
 
 
-def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_pixels_percent):
+def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_pixels_percent, target_mz_list=None,
+                   target_mz_name=None):
+    # Ensure the length of 'target_mz_list' and 'target_mz_name' is identical
     # Max intensity of an image should be greater than noise_threshold
     coord = np.array(msi_parser.coordinates)
     width = coord[:, 0].max() - coord[:, 0].min() + 1
@@ -66,8 +69,8 @@ def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_p
                                                                               y - y_minus, x - x_minus] *
                                                                           closest_item.iimage[
                                                                               y - y_minus, x - x_minus] + m * i) / (
-                                                                                     closest_item.iimage[
-                                                                                         y - y_minus, x - x_minus] + i)
+                                                                                 closest_item.iimage[
+                                                                                     y - y_minus, x - x_minus] + i)
                         closest_item.iimage[y - y_minus, x - x_minus] = closest_item.iimage[
                                                                             y - y_minus, x - x_minus] + i
 
@@ -77,6 +80,41 @@ def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_p
         if ion.real_points >= total_pixels * blank_pixels_percent and np.max(ion.iimage) >= noise_threshold:
             ion.mzmean = np.sum(ion.mzimage * ion.iimage) / np.sum(ion.iimage)
             final_ions.append(ion)
+
+    if target_mz_list:
+        for target_mz, target_name in zip(target_mz_list, target_mz_name):
+            delta_mz = resolution / 1e6 * target_mz
+            matched = False
+            for ion in final_ions:
+                if abs(ion.mzmean - target_mz) <= delta_mz:
+                    ion.compound = target_name
+                    matched = True
+                    break
+            if not matched:
+                tar_ion_image = IonImage(target_mz, width, height)
+                for idx, (x, y, _) in enumerate(msi_parser.coordinates):
+                    for m, i in zip(*msi_parser.getspectrum(idx)):
+                        if target_mz - delta_mz < m < target_mz + delta_mz:
+                            if tar_ion_image.iimage[y - y_minus, x - x_minus] == 0:
+                                tar_ion_image.mzimage[y - y_minus, x - x_minus] = m
+                                tar_ion_image.iimage[y - y_minus, x - x_minus] = i
+                                tar_ion_image.real_points += 1
+                            else:
+                                tar_ion_image.mzimage[y - y_minus, x - x_minus] = (tar_ion_image.mzimage[
+                                                                                       y - y_minus, x - x_minus] *
+                                                                                   tar_ion_image.iimage[
+                                                                                       y - y_minus, x - x_minus] + m * i) / (
+                                                                                          tar_ion_image.iimage[
+                                                                                              y - y_minus, x - x_minus] + i)
+                                tar_ion_image.iimage[y - y_minus, x - x_minus] = tar_ion_image.iimage[
+                                                                                     y - y_minus, x - x_minus] + i
+                tar_ion_image.mzmean = np.sum(tar_ion_image.mzimage * tar_ion_image.iimage) / np.sum(
+                    tar_ion_image.iimage)
+                tar_ion_image.compound = target_name
+                print(tar_ion_image.iimage.max())
+                if tar_ion_image.iimage.max() > 0:
+                    final_ions.append(tar_ion_image)
+
     return final_ions, mask
 
 
@@ -112,7 +150,7 @@ def extract_ion_images(msi_parser: ImzMLParser, target_mz, resolution):
 
 
 def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, noise_threshold, blank_pixels_percent,
-                           output_directory):
+                           output_directory, target_mz_list=None, target_mz_name=None):
     """
 
     :param output_directory: Directory to save the detected ion images and display the previous five images
@@ -125,17 +163,22 @@ def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, nois
     """
     os.makedirs(output_directory, exist_ok=True)
     inputs = []
-    for sample_id, sample_path in zip(sample_id_list, sample_path_list):
+    for k, (sample_id, sample_path) in enumerate(zip(sample_id_list, sample_path_list)):
         print(f'Obtaining ion images from {sample_id}...')
         msi_data = ImzMLParser(sample_path)
-        ions, msi_mask = get_ion_images(msi_data, resolution=ppm_torelance,
-                                        noise_threshold=noise_threshold, blank_pixels_percent=blank_pixels_percent)
+        if target_mz_list:
+            ions, msi_mask = get_ion_images(msi_data, resolution=ppm_torelance,
+                                            noise_threshold=noise_threshold, blank_pixels_percent=blank_pixels_percent,
+                                            target_mz_list=target_mz_list[k], target_mz_name=target_mz_name[k])
+        else:
+            ions, msi_mask = get_ion_images(msi_data, resolution=ppm_torelance,
+                                            noise_threshold=noise_threshold, blank_pixels_percent=blank_pixels_percent)
 
         # Export previous five pictures for each sample
         for i in range(min(5, len(ions))):
             fig, ax = plt.subplots()
             im = ax.imshow(ions[i].iimage, cmap='magma')
-            ax.set_title(f'm/z: {ions[i].mzmean:.4f}')
+            ax.set_title(f'm/z: {ions[i].mzmean:.4f} name: {ions[i].compound}')
             ax.set_xlabel('x')
             ax.set_ylabel('y')
             plt.colorbar(im, ax=ax)
@@ -195,7 +238,7 @@ def extract_sample_ion_image(sample_path_list, sample_id_list, target_mz, ppm_to
 
 
 if __name__ == '__main__':
-    """sample_path_list = [r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M14d-pos.imzML',
+    r"""sample_path_list = [r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M14d-pos.imzML',
                         r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M14d-neg.imzML',
                         r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M3m-pos.imzML',
                         r'D:\Experiments\MSI\kunming\合作项目-张登峰-空间代谢组-项目报告\合作项目-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M3m-neg.imzML'
@@ -240,12 +283,12 @@ if __name__ == '__main__':
     #                          ppm_torelance=10)
 
     # Evaluation 2: Integration of different ion modes
-    sample_path_list = [
-        r'E:\yangjun\msi\msi_open_data\metaspace-mcf\2025_03_18_mcf_pos-total ion count.imzML',
-        r'E:\yangjun\msi\msi_open_data\metaspace-mcf\2025_03_17_mcf_neg_lpval-total ion count.imzML'
-    ]
-    sample_id_list = ['mcf-pos', 'mcf-neg']
-    output_dir = r'E:\yangjun\msi\MSI_IIE_article\test_mcf_pos_neg'
+    # sample_path_list = [
+    #     r'E:\yangjun\msi\msi_open_data\metaspace-mcf\2025_03_18_mcf_pos-total ion count.imzML',
+    #     r'E:\yangjun\msi\msi_open_data\metaspace-mcf\2025_03_17_mcf_neg_lpval-total ion count.imzML'
+    # ]
+    # sample_id_list = ['mcf-pos', 'mcf-neg']
+    # output_dir = r'E:\yangjun\msi\MSI_IIE_article\test_mcf_pos_neg'
 
     # get_samples_ion_images(sample_path_list=sample_path_list,
     #                        sample_id_list=sample_id_list,
@@ -253,7 +296,142 @@ if __name__ == '__main__':
     #                        noise_threshold=500,
     #                        blank_pixels_percent=0.3,
     #                        output_directory=output_dir)
+    # extract_sample_ion_image(sample_path_list=sample_path_list,
+    #                          sample_id_list=sample_id_list,
+    #                          target_mz=516.2848,
+    #                          ppm_torelance=5)
+
+    # Evaluation 3: Application on large-scale imaging experiments
+    r"""sample_path_list = [
+        r'E:\yangjun\msi\ad_msi\raw_data\M14d-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M1m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M2m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M3m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M1_5m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P14d-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P1m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P2m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P3m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P1_5m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M14d-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M1m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M2m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M3m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M1_5m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P14d-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P1m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P2m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P3m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P1_5m-neg.imzML'
+    ]
+
+    sample_id_list = ['M_14d_pos', 'M_1m_pos', 'M_2m_pos', 'M_3m_pos', 'M_5m_pos',
+                      'P_14d_pos', 'P_1m_pos', 'P_2m_pos', 'P_3m_pos', 'P_5m_pos',
+                      'M_14d_neg', 'M_1m_neg', 'M_2m_neg', 'M_3m_neg', 'M_5m_neg',
+                      'P_14d_neg', 'P_1m_neg', 'P_2m_neg', 'P_3m_neg', 'P_5m_neg'
+                      ]
+    output_dir = r'E:\yangjun\msi\MSI_IIE_article\ad_study'
+
+    import pandas as pd
+    identified_pos = pd.read_excel(r'E:\yangjun\msi\ad_msi\Qualitative.xlsx', sheet_name='pos')
+    pos_mz = identified_pos['mz'].astype(float).tolist()
+    pos_name = identified_pos['Metabolites'].astype(str).tolist()
+    identified_neg = pd.read_excel(r'E:\yangjun\msi\ad_msi\Qualitative.xlsx', sheet_name='neg')
+    neg_mz = identified_neg['mz'].astype(float).tolist()
+    neg_name = identified_neg['Metabolites'].astype(str).tolist()
+    get_samples_ion_images(sample_path_list=sample_path_list,
+                           sample_id_list=sample_id_list,
+                           ppm_torelance=10,
+                           noise_threshold=100,
+                           blank_pixels_percent=0.3,
+                           output_directory=output_dir,
+                           target_mz_list=[pos_mz] * 10 + [neg_mz] * 10,
+                           target_mz_name=[pos_name] * 10 + [neg_name] * 10)"""
+
+    r"""# Extraction of specific ions in positive mode
+    sample_path_list = [
+        r'E:\yangjun\msi\ad_msi\raw_data\M14d-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M1m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M2m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M3m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M1_5m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P14d-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P1m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P2m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P3m-pos.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P1_5m-pos.imzML']
+
+    sample_id_list = ['M_14d_pos', 'M_1m_pos', 'M_2m_pos', 'M_3m_pos', 'M_5m_pos',
+                      'P_14d_pos', 'P_1m_pos', 'P_2m_pos', 'P_3m_pos', 'P_5m_pos']
+
     extract_sample_ion_image(sample_path_list=sample_path_list,
                              sample_id_list=sample_id_list,
-                             target_mz=516.2848,
-                             ppm_torelance=5)
+                             target_mz=169.98393,
+                             ppm_torelance=10)"""
+
+    r"""# Extraction of specific ions in negative mode
+    sample_path_list = [
+        r'E:\yangjun\msi\ad_msi\raw_data\M14d-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M1m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M2m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M3m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\M1_5m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P14d-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P1m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P2m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P3m-neg.imzML',
+        r'E:\yangjun\msi\ad_msi\raw_data\P1_5m-neg.imzML']
+
+    sample_id_list = ['M_14d_neg', 'M_1m_neg', 'M_2m_neg', 'M_3m_neg', 'M_5m_neg',
+                      'P_14d_neg', 'P_1m_neg', 'P_2m_neg', 'P_3m_neg', 'P_5m_neg']
+
+    extract_sample_ion_image(sample_path_list=sample_path_list,
+                             sample_id_list=sample_id_list,
+                             target_mz=733.4954,
+                             ppm_torelance=10)"""
+
+    r"""# Evaluation 4: Application on maldi imaging experiments
+    sample_path_list = [
+        r'E:\yangjun\msi\maldi_pre_exp_20250709\brain_tissue_chca_maldift_20250710_centroid.imzML',
+        r'E:\yangjun\msi\maldi_pre_exp_20250709\brain_tissue_chca_maldift_20250710_feature_list.imzML',
+        r'E:\yangjun\msi\maldi_pre_exp_20250709\brain_tissue_nedc_maldift_20250710_centroid.imzML',
+        r'E:\yangjun\msi\maldi_pre_exp_20250709\brain_tissue_nedc_maldift_20250710_feature_list.imzML'
+    ]
+
+    sample_id_list = ['chca-centroid', 'chca-features', 'nedc-centroid', 'nedc-features']
+    output_dir = r'E:\yangjun\msi\MSI_IIE_article\maldi_pre_experiment'
+
+    get_samples_ion_images(sample_path_list=sample_path_list,
+                           sample_id_list=sample_id_list,
+                           ppm_torelance=10,
+                           noise_threshold=100,
+                           blank_pixels_percent=0.3,
+                           output_directory=output_dir)"""
+
+    # Evaluation 5: Application on Ouyi whole brain 2 months
+    sample_path_list = [
+        r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M2M-neg.imzML',
+        r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\M2M-pos.imzML',
+        r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\P2M-neg.imzML',
+        r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\4.选区分析文件\MSiReader选区文件\P2M-pos.imzML'
+    ]
+
+    sample_id_list = ['M2M-neg', 'M2M-pos', 'P2M-neg', 'P2M-pos']
+    output_dir = r'E:\yangjun\msi\MSI_IIE_article\ad_whole_brain_pre'
+
+    import pandas as pd
+    identified_pos = pd.read_excel(r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\2.定性结果\Qualitative.xlsx', sheet_name='pos')
+    pos_mz = identified_pos['mz'].astype(float).tolist()
+    pos_name = identified_pos['Metabolites'].astype(str).tolist()
+    identified_neg = pd.read_excel(r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\2.定性结果\Qualitative.xlsx', sheet_name='neg')
+    neg_mz = identified_neg['mz'].astype(float).tolist()
+    neg_name = identified_neg['Metabolites'].astype(str).tolist()
+    get_samples_ion_images(sample_path_list=sample_path_list,
+                           sample_id_list=sample_id_list,
+                           ppm_torelance=10,
+                           noise_threshold=50,
+                           blank_pixels_percent=0.3,
+                           output_directory=output_dir,
+                           target_mz_list=[neg_mz, pos_mz, neg_mz, pos_mz],
+                           target_mz_name=[neg_name, pos_name, neg_name, pos_name])
+

@@ -1,11 +1,14 @@
 import numpy as np
 import copy
 import cv2
+import os
+import matplotlib.pyplot as plt
 
 
-def pre_alignment(inputs, sample_transform):
+def pre_alignment(inputs, sample_transform, output_path=None):
     """
 
+    :param output_path:
     :param inputs: list of data of all samples.
     [['sample id', shape_mask (bool array, shape: height, width), m/z array (length: # ion images), intensity array (shape: # ion images, height, width)], ...]
     :param sample_transform: Transformations for each sample, optional:
@@ -51,6 +54,18 @@ def pre_alignment(inputs, sample_transform):
 
         # shape mask (shape: height, width)
         s_input[1] = mask_transform_ops[s_transform](s_input[1])
+        # save s_input[1] to file 'output_path/{s_input[0]}_after_transformation.png'
+        # Export mask for each sample
+        if output_path:
+            fig, ax = plt.subplots()
+            im = ax.imshow(s_input[1])
+            ax.set_title(f'MSI mask (transformed) for {s_input[0]}')
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+            plt.colorbar(im, ax=ax)
+            o_path = os.path.join(output_path, f"{s_input[0]}_image_mask_transformed.png")
+            fig.savefig(o_path)
+            plt.close(fig)
 
     return inputs
 
@@ -63,7 +78,7 @@ def input_normalization(inputs):
         clipped = np.minimum(intensity_images, quantiles)
 
         max_vals = np.max(clipped, axis=(1, 2), keepdims=True)
-        normalized = clipped /max_vals
+        normalized = clipped /(max_vals + 0.000001)
 
         s_input[3] = normalized.astype(np.float32)
     return inputs
