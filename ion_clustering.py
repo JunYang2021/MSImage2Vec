@@ -7,6 +7,16 @@ from BTrees.OOBTree import OOBTree
 from scipy.spatial.distance import cosine
 import matplotlib.pyplot as plt
 
+plt.rcParams.update({
+    "font.family": "Arial",
+    "font.size": 10,
+    "axes.labelsize": 10,
+    "axes.titlesize": 11,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "legend.fontsize": 9
+})
+
 
 def extract_embeddings(inputs: List, embed_model: torch.nn.Module, model_path: str, batch_size: int = 32):
     """
@@ -118,7 +128,7 @@ def two_files_comparison(inputs_original, inputs_align, outputs_final, file1, fi
 
 
 # import umap error: LLVM ERROR: Symbol not found: __svml_sqrtf8
-def multi_files_umap(outputs_final, file_list=None):
+def multi_files_umap(outputs_final, file_list=None, output_path=None):
     """
 
     :param outputs_final:
@@ -127,6 +137,7 @@ def multi_files_umap(outputs_final, file_list=None):
     :return:
     """
     import umap
+    from mpl_toolkits.mplot3d import Axes3D
     temp_outputs = []
     if file_list is None:
         temp_outputs = outputs_final
@@ -150,7 +161,7 @@ def multi_files_umap(outputs_final, file_list=None):
 
     all_embeddings = np.vstack(all_embeddings)  # shape: (total_ions, embed_dim)
 
-    reducer = umap.UMAP(random_state=42)
+    reducer = umap.UMAP(n_components=3, random_state=42)
     umap_results = reducer.fit_transform(all_embeddings)  # shape: (total_ions, 2)
 
     unique_samples = list(set(sample_ids))
@@ -159,10 +170,12 @@ def multi_files_umap(outputs_final, file_list=None):
     colors = [color_map[sample] for sample in sample_ids]
 
     import matplotlib.pyplot as plt
-    plt.figure(figsize=(12, 8))
-    scatter = plt.scatter(
+    fig = plt.figure(figsize=(6, 5))
+    ax = fig.add_subplot(111, projection='3d')
+    scatter = ax.scatter(
         umap_results[:, 0],
         umap_results[:, 1],
+        umap_results[:, 2],
         c=colors,
         alpha=0.6,
         s=10  # 点大小
@@ -174,20 +187,33 @@ def multi_files_umap(outputs_final, file_list=None):
                    markerfacecolor=color_map[sample], markersize=10)
         for sample in unique_samples
     ]
-    plt.legend(handles=legend_elements, title="Sample ID", bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.legend(handles=legend_elements, title="Sample ID", bbox_to_anchor=(1.05, 1), loc='upper left')
 
-    plt.title("UMAP Projection of Ion Images (Colored by Sample ID)", fontsize=14)
-    plt.xlabel("UMAP 1")
-    plt.ylabel("UMAP 2")
+    ax.set_xlabel("UMAP 1")
+    ax.set_ylabel("UMAP 2")
+    ax.set_zlabel("UMAP 3")
     plt.grid(True, alpha=0.2)
     plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.show()
 
-    return umap_results, sample_ids, mz_values
+    return umap_results, sample_ids, mz_values  # 使用返回结果进行后续分析，file_list必须为空，否则会报错
 
 
-def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8):
+def dbscan_clustering(umap_results, eps=0.5, min_samples=5):
+    from sklearn.cluster import DBSCAN
+
+    clustering = DBSCAN(eps=eps, min_samples=min_samples)
+    labels = clustering.fit_predict(umap_results)
+
+    cluster_labels = labels.tolist()
+    return cluster_labels
+
+
+def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_path=None):
     if file_list is None:
+        file_list = [i[0] for i in outputs_final]
         temp_outputs = outputs_final
     else:
         temp_outputs = [s_output for s_output in outputs_final if s_output[0] in file_list]
@@ -220,13 +246,13 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8):
     cluster_labels = kmeans.fit_predict(pca_results)  # shape: (total_ions,)
 
     # 4. Plots for samples and clusters
-    plt.figure(figsize=(18, 7))
+    plt.figure(figsize=(4, 7.5))
 
     # Plot 1:
-    plt.subplot(1, 2, 1)
+    plt.subplot(2, 1, 1)
     unique_samples = list(set(sample_ids))
-    palette = sns.color_palette("husl", len(unique_samples))
-    color_map = {sample: palette[i] for i, sample in enumerate(unique_samples)}
+    palette = sns.color_palette("husl", len(file_list))
+    color_map = {sample: palette[i] for i, sample in enumerate(file_list)}
     colors = [color_map[sample] for sample in sample_ids]
     # color_map = {
     #     'pos': 'blue',
@@ -243,15 +269,14 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8):
         pca_results[:, 0],
         pca_results[:, 1],
         c=colors,
-        alpha=0.6,
-        s=10
+        s=7
     )
 
     # 添加图例和标签
     legend_elements = [
         plt.Line2D([0], [0], marker='o', color='w', label=sample,
-                   markerfacecolor=color_map[sample], markersize=10)
-        for sample in unique_samples
+                   markerfacecolor=color_map[sample], markersize=7)
+        for sample in file_list
     ]
     # legend_elements = [
     #     plt.Line2D([0], [0], marker='o', color='w', label='Positive Mode',
@@ -259,15 +284,14 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8):
     #     plt.Line2D([0], [0], marker='o', color='w', label='Negative Mode',
     #                markerfacecolor=color_map['neg'], markersize=10)
     # ]
-    plt.legend(handles=legend_elements, title="Sample ID", bbox_to_anchor=(1.05, 1), loc='upper left')
+    # plt.legend(handles=legend_elements, title="Sample", bbox_to_anchor=(0.76, 1), loc='upper left')  # aging samples
+    plt.legend(handles=legend_elements, title="Sample", bbox_to_anchor=(0.69, 1), loc='upper left')  # multi resolution samples
 
-    plt.title("PCA Projection of Ion Images (Colored by Sample ID)", fontsize=14)
     plt.xlabel(f"PC1 (Variance: {pca.explained_variance_ratio_[0]:.2f})")
     plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.2f})")
-    plt.grid(True, alpha=0.2)
 
     # Plot 2:
-    plt.subplot(1, 2, 2)
+    plt.subplot(2, 1, 2)
     cluster_palette = sns.color_palette("husl", n_clusters)
     cluster_colors = [cluster_palette[label] for label in cluster_labels]
 
@@ -275,8 +299,7 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8):
         pca_results[:, 0],
         pca_results[:, 1],
         c=cluster_colors,
-        alpha=0.6,
-        s=10
+        s=7
     )
 
     # 添加聚类中心的标记
@@ -285,12 +308,12 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8):
     for i, center in enumerate(centers):
         plt.text(center[0], center[1], str(i), fontsize=12, ha='center', va='center', color='black')
 
-    plt.title(f"PCA Projection with K-means Clustering (k={n_clusters})", fontsize=14)
     plt.xlabel(f"PC1 (Variance: {pca.explained_variance_ratio_[0]:.2f})")
     plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.2f})")
-    plt.grid(True, alpha=0.2)
-
     plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.show()
 
     return pca_results, sample_ids, mz_values, cluster_labels
@@ -349,7 +372,7 @@ def clusters_visualization(original_inputs, sample_ids, cluster_labels, output_f
             plt.close()
 
 
-def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, display_cluster):
+def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, display_cluster, output_path=None):
     """
 
     :param original_inputs:
@@ -379,7 +402,7 @@ def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, di
     import math
     n_rows = math.ceil(n_plots / n_cols)
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(1.8 * n_cols, 1.5 * n_rows))
     axes = axes.flatten()  # 变成 1D 列表，方便索引
 
     for idx, sample in enumerate(valid_samples):
@@ -395,15 +418,17 @@ def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, di
         cluster_images = np.mean(cluster_images, axis=0)
 
         ax = axes[idx]
-        img = ax.imshow(cluster_images, cmap='magma')
-        ax.set_title(f"Cluster {display_cluster} - Sample {sample}")
+        # img = ax.imshow(cluster_images, cmap='magma')
+        img = ax.imshow(np.rot90(cluster_images, k=1), cmap='magma')
+        ax.set_title(f"Cluster {display_cluster} - {sample}")
         ax.axis('off')
-        fig.colorbar(img, ax=ax, fraction=0.046, pad=0.04)
 
     for j in range(idx + 1, len(axes)):
         axes[j].axis('off')
 
     plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.show()
 
 
@@ -485,7 +510,7 @@ def find_mz_groups(mz_values, sample_ids, cluster_labels, output_folder, mz_tole
     print(f"Results written to {output_path}")
 
 
-def visualize_mz_embedding(outputs_final, file_list, interest_mz):
+def visualize_mz_embedding(outputs_final, file_list, interest_mz, output_path=None):
     if file_list is None:
         temp_outputs = outputs_final
     else:
@@ -523,15 +548,14 @@ def visualize_mz_embedding(outputs_final, file_list, interest_mz):
     highlight_mask = np.array([is_in_interest(mz, interest_mz) for mz in mz_values])
 
     # Plotting
-    plt.figure(figsize=(8, 6))
+    plt.figure(figsize=(4, 3))
 
     # Plot all points in gray
     plt.scatter(
         pca_results[:, 0],
         pca_results[:, 1],
         c='lightgray',
-        alpha=0.6,
-        s=10,
+        s=7,
         label='All Ions'
     )
 
@@ -543,21 +567,21 @@ def visualize_mz_embedding(outputs_final, file_list, interest_mz):
         highlighted_points[:, 0],
         highlighted_points[:, 1],
         c='red',
-        s=20,
+        s=8,
         label=f'{interest_mz:.4f}'
     )
 
     # Add text labels for highlighted points
     for (x, y), label in zip(highlighted_points, highlighted_ids):
-        plt.text(x, y, label, fontsize=8, color='red', alpha=0.8)
+        plt.text(x, y, label, fontsize=9, color='red')
 
     # Labels and formatting
-    plt.title("PCA of Ion Embeddings with Interest m/z Highlighted", fontsize=14)
     plt.xlabel(f"PC1 (Variance: {pca.explained_variance_ratio_[0]:.2f})")
     plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.2f})")
-    plt.grid(True, alpha=0.2)
     plt.legend()
     plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.show()
 
 

@@ -2,6 +2,17 @@ import numpy as np
 from pyimzml.ImzMLParser import ImzMLParser
 from BTrees.OOBTree import OOBTree
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+
+plt.rcParams.update({
+    "font.family": "Arial",
+    "font.size": 10,
+    "axes.labelsize": 10,
+    "axes.titlesize": 11,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "legend.fontsize": 9
+})
 import os
 import pickle
 from tqdm import tqdm
@@ -210,29 +221,41 @@ def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, nois
         pickle.dump(inputs, f)
 
 
-def extract_sample_ion_image(sample_path_list, sample_id_list, target_mz, ppm_torelance):
+def extract_sample_ion_image(sample_path_list, sample_id_list, target_mz, ppm_torelance, shape_mask_list,
+                             correction_list=[1, 1, 1], rot_time_list=[0, 0, 0], output_path=None):
     num_samples = len(sample_path_list)
-    num_rows = int(np.ceil(num_samples / 5))
-    fig, axes = plt.subplots(num_rows, 5, figsize=(20, 4 * num_rows))
+    fig, axes = plt.subplots(1, num_samples, figsize=(3 * num_samples, 3))
 
     # Flatten axes array for easy iteration
-    if num_rows > 1:
+    if num_samples > 1:
         axes = axes.flatten()
     else:
-        axes = [axes] if num_samples == 1 else axes
+        axes = [axes]
 
+    cmap = plt.cm.magma
+    cmap = cmap.copy()
+    cmap.set_bad(color='black')
     for i, (sample_id, sample_path) in enumerate(zip(sample_id_list, sample_path_list)):
         print(f'Obtaining ion images from {sample_id}...')
         msi_data = ImzMLParser(sample_path)
         tar_image = extract_ion_images(msi_data, target_mz, ppm_torelance)
+        mat = np.where(shape_mask_list[i] == 0, np.nan, tar_image.iimage)
+        mat = np.rot90(mat * correction_list[i], k=rot_time_list[i])
+        print(np.nanmax(mat))
+        threshold = np.percentile(mat[mat > 0], 95)
+        print(threshold)
+        mat_clipped = np.clip(mat, None, threshold)
+        im = axes[i].imshow(mat_clipped, cmap=cmap, vmin=np.nanmin(mat_clipped), vmax=threshold)
+        # axes[i].set_title(f'{sample_id} m/z: {target_mz:.4f}')
+        cbar = fig.colorbar(im, ax=axes[i], fraction=0.026, pad=0.04)
+        formatter = ticker.ScalarFormatter(useMathText=True)
+        formatter.set_scientific(True)
+        formatter.set_powerlimits((0, 0))
+        cbar.ax.yaxis.set_major_formatter(formatter)
+        axes[i].axis('off')
 
-        tar_image.plot(ax=axes[i])
-        axes[i].set_title(f'{sample_id}\nm/z: {target_mz:.4f}')
-
-    # Hide any unused axes
-    for j in range(i + 1, len(axes)):
-        axes[j].axis('off')
-
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.tight_layout()
     plt.show()
 
