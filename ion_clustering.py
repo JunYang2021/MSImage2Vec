@@ -269,7 +269,8 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_p
         pca_results[:, 0],
         pca_results[:, 1],
         c=colors,
-        s=7
+        # s=7
+        s=2
     )
 
     # 添加图例和标签
@@ -299,7 +300,8 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_p
         pca_results[:, 0],
         pca_results[:, 1],
         c=cluster_colors,
-        s=7
+        # s=7
+        s=2
     )
 
     # 添加聚类中心的标记
@@ -418,8 +420,8 @@ def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, di
         cluster_images = np.mean(cluster_images, axis=0)
 
         ax = axes[idx]
-        # img = ax.imshow(cluster_images, cmap='magma')
-        img = ax.imshow(np.rot90(cluster_images, k=1), cmap='magma')
+        img = ax.imshow(cluster_images, cmap='magma')
+        # img = ax.imshow(np.rot90(cluster_images, k=1), cmap='magma')
         ax.set_title(f"Cluster {display_cluster} - {sample}")
         ax.axis('off')
 
