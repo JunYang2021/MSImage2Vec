@@ -653,6 +653,89 @@ def two_classes_distance(outputs_final, class1_list, class2_list, class1_name='C
     return result
 
 
+def two_classes_davies_bouldin(
+    outputs_final,
+    class1_list,
+    class2_list,
+    class1_name='Class1',
+    class2_name='Class2'
+):
+    """
+    对每个 m/z 计算两个类别 embedding 的 Davies–Bouldin Index (DBI)
+
+    DBI 越小，表示该 m/z 下：
+    - 类内距离更小
+    - 类间分离度更大
+
+    :param outputs_final: [
+        ['sample id',
+         m/z array (length: # ion images),
+         embedding array (shape: # ion images, embedding dimension)
+        ], ...
+    ]
+    :param class1_list: 类 1 的样本名列表
+    :param class2_list: 类 2 的样本名列表
+    :return: list of (mz, db_index)
+    """
+
+    mz_tree = OOBTree()
+
+    for sample_output in outputs_final:
+        sample_id = sample_output[0]
+        mz_array = sample_output[1]
+        embedding_array = sample_output[2]
+
+        if sample_id in class1_list or sample_id in class2_list:
+            for i in range(len(mz_array)):
+                mz = mz_array[i]
+                embedding = embedding_array[i]
+
+                matched_mz = find_existing_mz(mz_tree, mz)
+                if matched_mz is None:
+                    mz_tree[mz] = {
+                        class1_name: [],
+                        class2_name: []
+                    }
+                    matched_mz = mz
+
+                if sample_id in class1_list:
+                    mz_tree[matched_mz][class1_name].append(embedding)
+                elif sample_id in class2_list:
+                    mz_tree[matched_mz][class2_name].append(embedding)
+
+    # -------- 计算 Davies–Bouldin Index --------
+    result = []
+
+    for mz, class_dict in mz_tree.items():
+        vecs1 = np.array(class_dict[class1_name])
+        vecs2 = np.array(class_dict[class2_name])
+
+        # 两类都至少需要 2 个样本，DBI 才有意义
+        if vecs1.shape[0] < 2 or vecs2.shape[0] < 2:
+            continue
+
+        # 质心
+        centroid1 = np.mean(vecs1, axis=0)
+        centroid2 = np.mean(vecs2, axis=0)
+
+        # 类内散度（平均欧氏距离）
+        S1 = np.mean(np.linalg.norm(vecs1 - centroid1, axis=1))
+        S2 = np.mean(np.linalg.norm(vecs2 - centroid2, axis=1))
+
+        # 类间距离
+        M12 = np.linalg.norm(centroid1 - centroid2)
+
+        # 避免数值问题
+        if M12 == 0:
+            continue
+
+        db_index = (S1 + S2) / M12
+        result.append((mz, db_index))
+
+    return result
+
+
+
 def plot_similarity_bar(sorted_similarity_results, top_k=None, figsize=(12, 6)):
     """
     可视化 m/z 与 cosine similarity 的柱状图
