@@ -205,6 +205,9 @@ class TripletImageDataset(Dataset):
         num_images = len(intensity_array)
         i1, i2, i3 = random.sample(range(num_images), 3)
         img1, img2, img3 = intensity_array[i1], intensity_array[i2], intensity_array[i3]
+        img1[~shape_mask] = 0
+        img2[~shape_mask] = 0
+        img3[~shape_mask] = 0
 
         corr12 = _correlation(img1, img2, shape_mask)
         corr13 = _correlation(img1, img3, shape_mask)
@@ -471,6 +474,23 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
     plt.show()
 
     return train_loss_log, test_loss_log, train_reg_log, test_reg_log, train_rank_log, test_rank_log
+
+
+def plot_loss_curve(train_loss, test_loss, train_reg, test_reg, train_rank, test_rank, output_path=None):
+    """绘制静态的 loss 曲线"""
+    plt.figure(figsize=(6, 4))
+    plt.plot(train_loss, label="Train Loss", marker='o', markersize=3)
+    plt.plot(test_loss, label="Test Loss", marker='s', markersize=3)
+    plt.plot(train_reg, label="Train Reg Loss", marker='p', markersize=3)
+    plt.plot(test_reg, label="Test Reg Loss", marker='*', markersize=3)
+    plt.plot(train_rank, label="Train Rank Loss", marker='d', markersize=3)
+    plt.plot(test_rank, label="Test Rank Loss", marker='v', markersize=3)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.show()
 
 
 # Example usage

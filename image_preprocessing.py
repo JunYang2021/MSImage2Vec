@@ -2,7 +2,6 @@ import numpy as np
 import copy
 import cv2
 import os
-import matplotlib.pyplot as plt
 
 
 def pre_alignment(inputs, sample_transform, output_path=None):
@@ -126,6 +125,183 @@ def resize_images(inputs, input_height, input_width):
 
     return inputs
 
+
+def display_mean_spectra_from_inputs(sample_input, mz_min=None, mz_max=None):
+    """
+    Display the mean spectrum for an input of a sample.
+
+    :param sample_input: list
+    [sample_id,
+     mask: ndarray of shape (w, h), dtype=bool,
+     mz: ndarray of shape (n,),
+     intensity: ndarray of shape (n,w, h)]
+    :param mz_min: float, optional
+    :param mz_max: float, optional
+    :return:
+    """
+
+    sample_id, mask, mz, intensity = sample_input
+    mz_filter = np.ones_like(mz, dtype=bool)
+    if mz_min is not None:
+        mz_filter &= mz >= mz_min
+    if mz_max is not None:
+        mz_filter &= mz <= mz_max
+
+    mz_filtered = mz[mz_filter]
+    intensity_filtered = intensity[mz_filter]
+
+    mean_intensity = []
+    for i in range(intensity_filtered.shape[0]):
+        masked_values = intensity_filtered[i][mask]
+        mean_intensity.append(masked_values.mean())
+
+    mean_intensity = np.asarray(mean_intensity)
+
+    plt.figure(figsize=(8, 5))
+    plt.stem(mz_filtered, mean_intensity, linefmt="k-", markerfmt=" ", basefmt=" ")
+    plt.xlabel("m/z")
+    plt.ylabel("Average Intensity")
+    plt.title(f"Mean Spectrum (Sample: {sample_id})")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+def get_ion_image_from_inputs(sample_input, mz_min=None, mz_max=None):
+    """
+    Display the ion image for an input of a sample.
+
+    :param sample_input: list
+    [sample_id,
+     mask: ndarray of shape (w, h), dtype=bool,
+     mz: ndarray of shape (n,),
+     intensity: ndarray of shape (n,w, h)]
+    :param mz_min: float, optional
+    :param mz_max: float, optional
+    :return:
+    """
+
+    sample_id, mask, mz, intensity = sample_input
+
+    mz_filter = np.ones_like(mz, dtype=bool)
+    if mz_min is not None:
+        mz_filter &= mz >= mz_min
+    if mz_max is not None:
+        mz_filter &= mz <= mz_max
+
+    # mz_filtered = mz[mz_filter]
+    intensity_filtered = intensity[mz_filter]
+    ion_image = intensity_filtered.sum(axis=0)
+    return ion_image, mask
+
+
+def display_ion_image_from_inputs(sample_input, mz_min=None, mz_max=None):
+    """
+    Display the ion image for an input of a sample.
+
+    :param sample_input: list
+    [sample_id,
+     mask: ndarray of shape (w, h), dtype=bool,
+     mz: ndarray of shape (n,),
+     intensity: ndarray of shape (n,w, h)]
+    :param mz_min: float, optional
+    :param mz_max: float, optional
+    :return:
+    """
+
+    sample_id, mask, mz, intensity = sample_input
+
+    mz_filter = np.ones_like(mz, dtype=bool)
+    if mz_min is not None:
+        mz_filter &= mz >= mz_min
+    if mz_max is not None:
+        mz_filter &= mz <= mz_max
+
+    # mz_filtered = mz[mz_filter]
+    intensity_filtered = intensity[mz_filter]
+    ion_image = intensity_filtered.sum(axis=0)
+    title_str = f"Summed Intensity from m/z {mz_min:.4f} to m/z {mz_max:.4f}"
+
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+
+    im0 = axes[0].imshow(mask,  cmap='viridis')
+    axes[0].set_title("Mask")
+    axes[0].axis("Off")
+
+    im1 = axes[1].imshow(ion_image, cmap='viridis')
+    axes[1].set_title(title_str)
+    axes[1].axis("Off")
+
+    fig.suptitle(f"Ion Image (Sample: {sample_id})")
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def rotate_image_clockwise(sample_input, angle):
+    """
+
+    :param sample_input: sample_input: list
+    [sample_id,
+     mask: ndarray of shape (w, h), dtype=bool,
+     mz: ndarray of shape (n,),
+     intensity: ndarray of shape (n,w, h)]
+    :param angle: float, optional
+    Clockwise rotation angle in degrees
+    :return:
+    """
+    # Update mask and intensity array
+    sample_id, mask, mz, intensity = sample_input
+    n, h, w = intensity.shape
+    center = (w / 2, h / 2)
+    M = cv2.getRotationMatrix2D(center, -angle, 1.0)
+    rotated_mask = cv2.warpAffine(
+        mask,
+        M,
+        (w, h),  # output size, inappropriate
+        flags=cv2.INTER_NEAREST,
+        borderValue=0
+    )
+    rotated_intensity = np.empty_like(intensity)
+    for i in range(n):
+        rotated_intensity[i] = cv2.warpAffine(
+        intensity[i],
+        M,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0
+        )
+    return [sample_id, rotated_mask, mz, rotated_intensity]
+
+
+def save_ion_image(sample_input, outpath, mz_min=None, mz_max=None):
+    """
+    Save ion image of specified range to numpy file
+
+    :param mz_min: float, optional
+    :param mz_max: float, optional
+    :param sample_input: list
+    [sample_id,
+     mask: ndarray of shape (w, h), dtype=bool,
+     mz: ndarray of shape (n,),
+     intensity: ndarray of shape (n,w, h)]
+    :return:
+    """
+    # 1. Compute the ion image in specified mz range
+    sample_id, mask, mz, intensity = sample_input
+    mz_filter = np.ones_like(mz, dtype=bool)
+    if mz_min is not None:
+        mz_filter &= mz >= mz_min
+    if mz_max is not None:
+        mz_filter &= mz <= mz_max
+
+    mz_filtered = mz[mz_filter]
+    intensity_filtered = intensity[mz_filter]
+    ion_image = intensity_filtered.sum(axis=0)
+
+    np.save(outpath, ion_image)
 
 
 if __name__ == '__main__':
