@@ -886,7 +886,7 @@ if __name__ == "__main__":
 
 
     # Bayes optimization
-    import optuna  # 还可使用bayes_opt
+    '''import optuna
 
     # Optuna Objective Function
     def objective(trial):
@@ -960,5 +960,112 @@ if __name__ == "__main__":
     print(f"  Value: {study.best_trial.value:.6f}")
     print("  Params:")
     for k, v in study.best_trial.params.items():
-        print(f"    {k}: {v}")
+        print(f"    {k}: {v}")'''
+
+
+    # Bayesian optimization based on bayes_opt
+    from bayes_opt import BayesianOptimization
+
+
+    def bayes_objective(
+            embedding_dim,
+            num_inception_blocks,
+            dropout_p,
+            batch_size,
+            rank_reg_loss_ratio,
+            lr
+    ):
+        # ----------------------------
+        # Convert types
+        # ----------------------------
+        embedding_dim = int(round(embedding_dim))
+        num_inception_blocks = int(round(num_inception_blocks))
+        batch_size = int(round(batch_size))
+        rank_reg_loss_ratio = float(rank_reg_loss_ratio)
+        lr = float(lr)
+
+        # ----------------------------
+        # Update args
+        # ----------------------------
+        args.embedding_dim = embedding_dim
+        args.num_inception_blocks = num_inception_blocks
+        args.dropout_p = dropout_p
+        args.batch_size = batch_size
+        args.rank_reg_loss_ratio = rank_reg_loss_ratio
+        args.lr = lr
+
+        # Fix optimizer (can be extended later)
+        args.optmizer = "Adam"
+
+        # ----------------------------
+        # Reproducibility
+        # ----------------------------
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+
+        # ----------------------------
+        # Build model
+        # ----------------------------
+        model = MultiscaleEmbedding(
+            embedding_dim=args.embedding_dim,
+            num_inception_blocks=args.num_inception_blocks,
+            dropout_p=args.dropout_p
+        )
+
+        # ----------------------------
+        # Train model
+        # ----------------------------
+        (
+            train_loss_log,
+            test_loss_log,
+            *_,
+        ) = train_embedding(inputs_after, model, args)
+
+        final_test_loss = test_loss_log[-1]
+
+        # BO maximizes → negate loss
+        return -final_test_loss
+
+
+    pbounds = {
+        "embedding_dim": (28, 256),
+        "num_inception_blocks": (1, 5),
+        "dropout_p": (0.0, 0.4),
+        "batch_size": (100, 800),
+        "rank_reg_loss_ratio": (0.0, 10.0),
+        "lr": (1e-5, 5e-4),
+    }
+
+    optimizer = BayesianOptimization(
+        f=bayes_objective,
+        pbounds=pbounds,
+        random_state=42,
+        verbose=2,
+    )
+
+    optimizer.maximize(
+        init_points=5,  # random initialization
+        n_iter=20,  # Bayesian steps
+    )
+
+    best_params = optimizer.max["params"]
+
+    # Convert discrete params properly
+    best_params["embedding_dim"] = int(round(best_params["embedding_dim"]))
+    best_params["num_inception_blocks"] = int(round(best_params["num_inception_blocks"]))
+    best_params["batch_size"] = int(round(best_params["batch_size"]))
+
+    print("Best hyperparameters found:")
+    for k, v in best_params.items():
+        print(f"{k}: {v}")
+
+    print(f"Best test loss: {-optimizer.max['target']:.6f}")
+
+    import pandas as pd
+
+    results = pd.DataFrame(optimizer.res)
+    results.to_csv("bayes_optimization_results.csv", index=False)
+
+
+
 
