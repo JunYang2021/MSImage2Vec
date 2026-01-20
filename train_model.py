@@ -12,8 +12,11 @@ import cv2
 from tqdm import tqdm
 import os
 import matplotlib.pyplot as plt
-from embedding_models import ResNetEmbedding, ViTEmbedding, EfficientNetEmbedding, SimpleCNNEmbedding, MultiscaleEmbedding
+from embedding_models import ResNetEmbedding, ViTEmbedding, EfficientNetEmbedding, SimpleCNNEmbedding, \
+    MultiscaleEmbedding
 import time
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
 
 
 def divide_train_test(inputs: List, seed=None):
@@ -60,7 +63,12 @@ def _correlation(img1: np.ndarray, img2: np.ndarray, mask: np.ndarray) -> float:
     corr, _ = spearmanr(flat1, flat2)
     return corr
 
-def _image_distort(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+
+def _image_distort(img: np.ndarray,
+                   mask: np.ndarray,
+                   alpha_height_ratio=2,
+                   sigma_height_ratio=0.12,
+                   max_rotation_degree=45) -> np.ndarray:
     distorted = img.copy()
     height, width = img.shape
 
@@ -72,13 +80,11 @@ def _image_distort(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     # 2. Elastic deformations (non-linear distortions)
     if random.random() > 0.5:  # Apply to 50% of images
         # The strength of elastic deformation. Larger value means bigger deformation
-        alpha = random.uniform(height * 0.8, height * 1.8)
+        # alpha = random.uniform(height * 1.8, height * 2.8)
         # The smoothness of elastic deformation. Larger value means smoother deformation
-        sigma = random.uniform(height * 0.1, height * 0.15)
-        # The strength of elastic deformation. Larger value means bigger deformation
-        alpha = random.uniform(height * 1.8, height * 2.8)
-        # The smoothness of elastic deformation. Larger value means smoother deformation
-        sigma = random.uniform(height * 0.1, height * 0.15)
+        # sigma = random.uniform(height * 0.1, height * 0.15)
+        alpha = alpha_height_ratio * height
+        sigma = sigma_height_ratio * height
 
         # Displacement fields
         # np.random.rand range: [0, 1)  np.random.ran() * 2 -1 range: [-1, 1)
@@ -92,8 +98,7 @@ def _image_distort(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
         distorted = map_coordinates(distorted, [y_distorted, x_distorted], order=1, mode='constant')
 
     # 3. Random rotation (-45 to 45 degrees) and scaling (90% to 110%)
-    angle = random.uniform(-15, 15)
-    angle = random.uniform(-45, 45)
+    angle = random.uniform(-max_rotation_degree, max_rotation_degree)
     center = (width // 2, height // 2)
     scale = random.uniform(0.90, 1.1)
     M = cv2.getRotationMatrix2D(center, angle, scale)
@@ -116,8 +121,8 @@ def _image_distort(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return distorted
 
 
-class ImageDataset(Dataset):
-    def __init__(self, inputs: List, pairs_per_sample: int = 20000):
+"""class ImageDataset(Dataset):
+    def __init__(self, inputs: List):
         self.pairs = []
         for s_input in inputs:
             sample_id, shape_mask, _, intensity_array = s_input
@@ -146,11 +151,15 @@ class ImageDataset(Dataset):
         img1_tensor = torch.FloatTensor(img1).unsqueeze(0)  # Shape: 1, height, width
         img2_tensor = torch.FloatTensor(img2).unsqueeze(0)  # Shape: 1, height, width
 
-        return img1_tensor, img2_tensor, corr
+        return img1_tensor, img2_tensor, corr"""
 
 
 class TripletImageDataset(Dataset):
-    def __init__(self, inputs: List, triplets_per_sample: int = 20000):
+    def __init__(self, inputs: List, triplets_per_sample: int = 20000,
+                 alpha_height_ratio=2,
+                 sigma_height_ratio=0.12,
+                 max_rotation_degree=45
+                 ):
         """self.triplets = []
         for s_input in inputs:
             sample_id, shape_mask, _, intensity_array = s_input
@@ -182,6 +191,9 @@ class TripletImageDataset(Dataset):
         self.inputs = inputs
         self.triplets_per_sample = triplets_per_sample
         self.total_triplets = len(inputs) * triplets_per_sample
+        self.alpha_height_ratio = alpha_height_ratio
+        self.sigma_height_ratio = sigma_height_ratio
+        self.max_ratation_degree = max_rotation_degree
         print('Use Spearman correlation as training goal.')
 
     def __len__(self) -> int:
@@ -220,8 +232,15 @@ class TripletImageDataset(Dataset):
             corr_ap, corr_an = corr13, corr12
 
         anchor_img = _image_distort(img1, shape_mask)
-        pos_img = _image_distort(pos_img, shape_mask)
-        neg_img = _image_distort(neg_img, shape_mask)
+        pos_img = _image_distort(pos_img, shape_mask,
+                                 alpha_height_ratio=self.alpha_height_ratio,
+                                 sigma_height_ratio=self.sigma_height_ratio,
+                                 max_rotation_degree=self.max_ratation_degree)
+        neg_img = _image_distort(neg_img, shape_mask,
+                                 alpha_height_ratio=self.alpha_height_ratio,
+                                 sigma_height_ratio=self.sigma_height_ratio,
+                                 max_rotation_degree=self.max_ratation_degree
+                                 )
 
         to_tensor = lambda img: torch.FloatTensor(img).unsqueeze(0)
         return (
@@ -233,21 +252,21 @@ class TripletImageDataset(Dataset):
         )
 
 
-class CorrelationLoss(nn.Module):
-    """Loss function that measures the difference between embedding cosine similarity
-    and actual image correlation"""
+"""class CorrelationLoss(nn.Module):
+    # Loss function that measures the difference between embedding cosine similarity
+    # and actual image correlation
 
     def __init__(self):
         super().__init__()
 
     def forward(self, emb1: torch.Tensor, emb2: torch.Tensor,
                 target_corr: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            emb1, emb2: Embeddings of the two images (batch_size x embedding_dim)
-            target_corr: Target correlation coefficients (batch_size)
+        
+        # Args:
+        #     emb1, emb2: Embeddings of the two images (batch_size x embedding_dim)
+        #     target_corr: Target correlation coefficients (batch_size)
         # Margin-based MSE
-        """
+        
         cos_sim = F.cosine_similarity(emb1, emb2)
         # diff = torch.abs(cos_sim - target_corr)
         # loss = F.mse_loss(cos_sim, target_corr)
@@ -255,7 +274,7 @@ class CorrelationLoss(nn.Module):
         # return loss
         loss = F.mse_loss(cos_sim, target_corr.float())
 
-        return loss
+        return loss"""
 
 
 class JointLoss(nn.Module):
@@ -275,7 +294,6 @@ class JointLoss(nn.Module):
         total_loss = reg_loss + self.alpha * rank_loss
 
         return total_loss, reg_loss.detach(), rank_loss.detach()
-
 
 
 class Animator:
@@ -344,7 +362,9 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
     Args:
         inputs: List of sample data
         model: The embedding model to train
-        args: Training arguments (should contain lr, epochs, batch_size, etc.)
+        args: Training arguments
+        (seed, train_pairs_per_sample, alpha_height_ratio, sigma_height_ratio, max_rotation_degree, batch_size, rank_reg_loss_ratio, optimizer, lr,
+        max_epochs, early_stop_patience, early_stop_delta, output_path, model_data_file)
 
     Returns:
         Tuple of (train_loss_log, test_loss_log)
@@ -354,22 +374,29 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
     train_inputs, test_inputs = divide_train_test(inputs, seed=args.seed)
 
     # Create datasets
-    train_dataset = TripletImageDataset(train_inputs, triplets_per_sample=args.train_pairs_per_sample)
-    test_dataset = TripletImageDataset(test_inputs, triplets_per_sample=args.test_pairs_per_sample)
+    train_dataset = TripletImageDataset(train_inputs,
+                                        triplets_per_sample=args.train_pairs_per_sample,
+                                        alpha_height_ratio=args.alpha_height_ratio,
+                                        sigma_height_ratio=args.sigma_height_ratio,
+                                        max_rotation_degree=args.max_rotation_degree
+                                        )
 
     # Create dataloaders
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
                               shuffle=True, num_workers=4)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
-                             shuffle=False, num_workers=4)
 
     time1 = time.time()
 
     # Initialize model, loss, and optimizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    criterion = JointLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    criterion = JointLoss(alpha=args.rank_reg_loss_ratio)
+    optimizerD = {'Adam': torch.optim.Adam(model.parameters(), lr=args.lr),
+                  'SGD': torch.optim.SGD(lr=args.lr),
+                  'RMSprop': torch.optim.RMSprop(lr=args.lr),
+                  'Adagrad': torch.optim.Adagrad(lr=args.lr),
+                  'AdamW': torch.optim.AdamW(lr=args.lr)}
+    optimizer = optimizerD[args.optimizer]
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', patience=3, factor=0.1)
 
@@ -377,8 +404,8 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
     test_loss_log = []
     train_reg_log = []
     train_rank_log = []
-    test_reg_log = []
-    test_rank_log = []
+    test_sim_log = []
+    test_class_log = []
 
     best_test_loss = float('inf')
 
@@ -386,17 +413,50 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
         xlabel='Epoch', ylabel='Loss',
         legend=[
             'Train Total', 'Test Total',
-            'Train Reg', 'Test Reg',
-            'Train Rank', 'Test Rank'
+            'Train Reg', 'Test Similarity',
+            'Train Rank', 'Test Classification'
         ],
         xlim=[1, args.epochs],
         fmts=('-', 'm--', 'g-.', 'r', 'c:', 'b-.'),
         figsize=(8, 5)
     )
 
+    # Prepare test images
+    test_cache = []
+
+    for s_input in test_inputs:
+        sample_id, shape_mask, _, intensity_array = s_input
+
+        # Vectorized tensor conversion
+        imgs = torch.from_numpy(intensity_array).float().unsqueeze(1)  # (N, 1, H, W)
+        mask = torch.from_numpy(shape_mask).bool()
+
+        imgs[:, 0, ~mask] = 0.0
+
+        img_corr = np.zeros((imgs.shape[0], imgs.shape[0]))
+        for i in range(imgs.shape[0]):
+            for j in range(imgs.shape[0]):
+                img_corr[i, j] = _correlation(
+                    intensity_array[i],
+                    intensity_array[j],
+                    shape_mask
+                )
+
+        test_cache.append({
+            "images": imgs,
+            "intensity_array": intensity_array,
+            "shape_mask": shape_mask,
+            "num_images": imgs.shape[0],
+            "img_corr": img_corr
+        })
+
     # Training loop
-    for epoch in range(args.epochs):
+    early_stop_counter = 0
+    best_epoch = 0
+    best_model_state = None
+    for epoch in range(args.max_epochs):  # Change with early stopping, max epoch is args.epochs
         model.train()
+        train_t0 = time.time()
         running_loss = 0.0
         running_reg = 0.0
         running_rank = 0.0
@@ -404,8 +464,8 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
         # Training phase
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs} [Train]")
         for img1, img2, img3, corr12, corr13 in pbar:
-            img1, img2, img3, corr12, corr13 = img1.to(device),\
-                img2.to(device), img3.to(device), corr12.to(device), corr13.to(device)
+            img1, img2, img3, corr12, corr13 = img1.to(device), \
+                                               img2.to(device), img3.to(device), corr12.to(device), corr13.to(device)
             # print(img1.shape)
             optimizer.zero_grad()
 
@@ -424,56 +484,110 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
             running_loss += loss.item() * img1.size(0)
             running_reg += reg_loss.item() * img1.size(0)
             running_rank += rank_loss.item() * img1.size(0)
-            pbar.set_postfix({'loss': loss.item()})
+            pbar.set_postfix({'Training loss': loss.item()})
 
         train_loss_log.append(running_loss / len(train_loader.dataset))
         train_reg_log.append(running_reg / len(train_loader.dataset))
         train_rank_log.append(running_rank / len(train_loader.dataset))
+        train_t1 = time.time()
 
         # Evaluation phase
         model.eval()
-        test_loss = 0.0
-        test_reg = 0.0
-        test_rank = 0.0
+        test_t0 = time.time()
+        test_spearman_loss = 0.0
+
+        all_embeddings = []
+        all_labels = []
+
         with torch.no_grad():
-            for img1, img2, img3, corr12, corr13 in test_loader:
-                img1, img2, img3, corr12, corr13 = img1.to(device), \
-                    img2.to(device), img3.to(device), corr12.to(device), corr13.to(device)
+            for sample_idx, cache in enumerate(test_cache):
+                imgs = cache["images"].to(device)  # (Ni, 1, H, W)
+                num_images = cache["num_images"]
+                img_corr = cache["img_corr"]
 
-                emb1 = model(img1)
-                emb2 = model(img2)
-                emb3 = model(img3)
+                # --- Compute embeddings ---
+                emb = model(imgs)  # (Ni, D)
+                emb = F.normalize(emb, dim=1)
+                emb_sim = (emb @ emb.T).cpu().numpy()
 
-                loss, reg_loss, rank_loss = criterion(emb1, emb2, emb3, corr12, corr13)
-                test_loss += loss.item() * img1.size(0)
-                test_reg += reg_loss.item() * img1.size(0)
-                test_rank += rank_loss.item() * img1.size(0)
+                # --- Spearman loss ---
+                gt_vals = img_corr[np.triu_indices(num_images, k=1)]
+                emb_vals = emb_sim[np.triu_indices(num_images, k=1)]
 
-        test_loss_log.append(test_loss / len(test_loader.dataset))
-        test_reg_log.append(test_reg / len(test_loader.dataset))
-        test_rank_log.append(test_rank / len(test_loader.dataset))
+                spearman_corr, _ = spearmanr(gt_vals, emb_vals)
+                spearman_loss = 1.0 - spearman_corr
+
+                test_spearman_loss += spearman_loss
+
+                all_embeddings.append(emb.cpu())
+                all_labels.append(
+                    torch.full((num_images,), sample_idx, dtype=torch.long)
+                )
+
+            all_embeddings = torch.cat(all_embeddings, dim=0).numpy()
+            all_labels = torch.cat(all_labels, dim=0).numpy()
+
+            clf = LogisticRegression(
+                max_iter=500,
+                multi_class="auto",
+                n_jobs=1
+            )
+
+            try:
+                clf.fit(all_embeddings, all_labels)
+                preds = clf.predict(all_embeddings)
+                classification_loss = accuracy_score(all_labels, preds)
+            except Exception:
+                classification_loss = 1.0  # worst-case penalty
+
+            test_classification_loss = classification_loss
+            test_loss = test_spearman_loss / len(test_cache) / 2 + test_classification_loss / 2
+
+        test_loss_log.append(test_loss)
+        test_sim_log.append(test_spearman_loss)
+        test_class_log.append(test_classification_loss)
+        test_t1 = time.time()
         print(f"Epoch {epoch + 1}/{args.epochs}: "
-              f"Train Loss: {train_loss_log[-1]:.4f}, Test Loss: {test_loss_log[-1]:.4f}")
+              f"Train Loss: {train_loss_log[-1]:.4f} (Time: {int(train_t1 - train_t0)} s), Test Loss: {test_loss_log[-1]:.4f} (Time: {int(test_t1 - test_t0)} s)")
 
         # Update learning rate
         scheduler.step(test_loss_log[-1])
         animator.add(epoch + 1, [
             train_loss_log[-1], test_loss_log[-1],
-            train_reg_log[-1], test_reg_log[-1],
-            train_rank_log[-1], test_rank_log[-1]
+            train_reg_log[-1], test_sim_log[-1],
+            train_rank_log[-1], test_class_log[-1]
         ])
 
         # Save best model
-        if test_loss_log[-1] < best_test_loss:
+        if test_loss_log[-1] < best_test_loss - args.early_stop_delta:
             best_test_loss = test_loss_log[-1]
-            torch.save(model.state_dict(), os.path.join(args.output_path, args.model_data_file))
+            best_epoch = epoch
+            early_stop_counter = 0
+
+            best_model_state = {
+                k: v.cpu().clone() for k, v in model.state_dict().items()
+            }
+
+            torch.save(best_model_state, os.path.join(args.output_path, args.model_data_file))
+        else:
+            early_stop_counter += 1
+        if early_stop_counter >= args.early_stop_patience:
+            print(
+                f"Early stopping triggered at epoch {epoch + 1}. "
+                f"Best epoch: {best_epoch + 1}, "
+                f"Best test loss: {best_test_loss:.4f}"
+            )
+            break
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
 
     time2 = time.time()
     print(f'Time of preparing data: {time1 - time0}. Time of training model: {time2 - time1}')
     plt.ioff()
     plt.show()
 
-    return train_loss_log, test_loss_log, train_reg_log, test_reg_log, train_rank_log, test_rank_log
+    return train_loss_log, test_loss_log, train_reg_log, test_sim_log, train_rank_log, test_class_log
 
 
 def plot_loss_curve(train_loss, test_loss, train_reg, test_reg, train_rank, test_rank, output_path=None):
@@ -482,9 +596,9 @@ def plot_loss_curve(train_loss, test_loss, train_reg, test_reg, train_rank, test
     plt.plot(train_loss, label="Train Loss", marker='o', markersize=3)
     plt.plot(test_loss, label="Test Loss", marker='s', markersize=3)
     plt.plot(train_reg, label="Train Reg Loss", marker='p', markersize=3)
-    plt.plot(test_reg, label="Test Reg Loss", marker='*', markersize=3)
+    plt.plot(test_reg, label="Test Similarity Loss", marker='*', markersize=3)
     plt.plot(train_rank, label="Train Rank Loss", marker='d', markersize=3)
-    plt.plot(test_rank, label="Test Rank Loss", marker='v', markersize=3)
+    plt.plot(test_rank, label="Test Classification Loss", marker='v', markersize=3)
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
@@ -553,7 +667,6 @@ if __name__ == "__main__":
         plt.colorbar(im2, ax=ax2)
         plt.show()"""
 
-
     # Test in five samples
     # import pickle
     # with open(r'E:\yangjun\msi\MSI_IIE_article\test_five_samples\input_data.pkl', 'rb') as f:
@@ -591,7 +704,6 @@ if __name__ == "__main__":
     # Train the model
 
     # train_losses, test_losses = train_embedding(inputs_after, model, args)
-
 
     # Test in mcf-pos-neg
     r"""import pickle
@@ -711,7 +823,7 @@ if __name__ == "__main__":
     model = MultiscaleEmbedding(embedding_dim=args.embedding_dim)
     train_losses, test_losses = train_embedding(inputs_after, model, args)"""
 
-    # Evaluation: application on ad whole brain preexperiment data
+    r"""# Evaluation: application on ad whole brain preexperiment data
     import pickle
 
     with open(r'E:\yangjun\msi\MSI_IIE_article\ad_whole_brain_pre\input_data.pkl', 'rb') as f:
@@ -741,4 +853,112 @@ if __name__ == "__main__":
     print(f'Preprocessing finishing. ({ih}, {iw})')
 
     model = MultiscaleEmbedding(embedding_dim=args.embedding_dim)
-    train_losses, test_losses = train_embedding(inputs_after, model, args)
+    train_losses, test_losses = train_embedding(inputs_after, model, args)"""
+
+
+    class Args:
+        seed = 42
+        train_pairs_per_sample = 5000
+        alpha_height_ratio = 2  # (0, 3)
+        sigma_height_ratio = 0.12  # (0, 1)
+        max_rotation_degree = 45  # (0, 60)
+        batch_size = 200  # (100, 800)
+        rank_reg_loss_ratio = 1   # (0, 10)
+        optimizer = "Adam"  # ['Adam','SGD','RMSprop','Adagrad','AdamW']
+        lr = 1e-4
+        max_epochs = 60
+        early_stop_patience = 8
+        early_stop_delta = 1e-4
+        output_path = r'E:\yangjun\msi\MSI_IIE_article\ad_whole_brain_pre'
+        model_data_file = 'multiscale_cnn_32d_ad.pth'
+
+        embedding_dim = 28  # (28, 256)
+        num_inception_blocks = 4  # (1, 5)
+        dropout_p = 0.2 # (0, 0.4)
+
+
+    args = Args()
+    model = MultiscaleEmbedding(embedding_dim=args.embedding_dim,
+                                num_inception_blocks=args.num_inception_blocks,
+                                dropout_p=args.dropout_p)
+    train_loss_log, test_loss_log, train_reg_log, test_sim_log, train_rank_log, test_class_log = train_embedding(
+        inputs_after, model, args)
+
+
+    # Bayes optimization
+    import optuna  # 还可使用bayes_opt
+
+    # Optuna Objective Function
+    def objective(trial):
+
+        class Args:
+            # Fixed
+            seed = 42
+            train_pairs_per_sample = 5000
+            output_path = r'E:\yangjun\msi\MSI_IIE_article\ad_whole_brain_pre'
+            model_data_file = f'multiscale_cnn_trial_{trial.number}.pth'
+            max_epochs = 60
+            early_stop_patience = 8
+            early_stop_delta = 1e-4
+
+            # Data augmentation
+            alpha_height_ratio = trial.suggest_float("alpha_height_ratio", 0.0, 3.0)
+            sigma_height_ratio = trial.suggest_float("sigma_height_ratio", 0.0, 1.0)
+            max_rotation_degree = trial.suggest_int("max_rotation_degree", 0, 60)
+
+            # Training
+            batch_size = trial.suggest_int("batch_size", 100, 800, step=50)
+            rank_reg_loss_ratio = trial.suggest_float("rank_reg_loss_ratio", 0.0, 10.0)
+            optimizer = trial.suggest_categorical(
+                "optimizer", ["Adam", "SGD", "RMSprop", "Adagrad", "AdamW"]
+            )
+            lr = trial.suggest_float("lr", 1e-5, 5e-4, log=True)
+
+            # Architecture
+            embedding_dim = trial.suggest_int("embedding_dim", 28, 256, step=16)
+            num_inception_blocks = trial.suggest_int("num_inception_blocks", 1, 5)
+            dropout_p = trial.suggest_float("dropout_p", 0.0, 0.4)
+
+        args = Args()
+
+        # Reproducibility
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
+        model = MultiscaleEmbedding(
+            embedding_dim=args.embedding_dim,
+            num_inception_blocks=args.num_inception_blocks,
+            dropout_p=args.dropout_p,
+        )
+
+        try:
+            _, test_loss_log, _, _, _, _ = train_embedding(
+                inputs_after, model, args
+            )
+
+            final_test_loss = test_loss_log[-1]
+
+        except RuntimeError as e:
+            print(f"Trial {trial.number} failed: {e}")
+            return float("inf")
+
+        return final_test_loss
+
+    # Run Bayesian Optimization
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=42),
+    )
+
+    study.optimize(objective, n_trials=50)
+
+    # Inspect Best Results
+    print("Best trial:")
+    print(f"  Value: {study.best_trial.value:.6f}")
+    print("  Params:")
+    for k, v in study.best_trial.params.items():
+        print(f"    {k}: {v}")
+
