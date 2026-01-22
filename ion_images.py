@@ -173,17 +173,28 @@ def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, nois
     :return:
     """
     os.makedirs(output_directory, exist_ok=True)
+
+    n_samples = len(sample_path_list)
+    if isinstance(noise_threshold, (list, tuple, np.ndarray)):
+        if len(noise_threshold) != n_samples:
+            raise ValueError(
+                f"Length of noise_threshold ({len(noise_threshold)}) must match "
+                f"number of samples ({n_samples})."
+            )
+        noise_threshold_list = list(noise_threshold)
+    else:
+        noise_threshold_list = [noise_threshold] * n_samples
     inputs = []
     for k, (sample_id, sample_path) in enumerate(zip(sample_id_list, sample_path_list)):
         print(f'Obtaining ion images from {sample_id}...')
         msi_data = ImzMLParser(sample_path)
         if target_mz_list:
             ions, msi_mask = get_ion_images(msi_data, resolution=ppm_torelance,
-                                            noise_threshold=noise_threshold, blank_pixels_percent=blank_pixels_percent,
+                                            noise_threshold=noise_threshold_list[k], blank_pixels_percent=blank_pixels_percent,
                                             target_mz_list=target_mz_list[k], target_mz_name=target_mz_name[k])
         else:
             ions, msi_mask = get_ion_images(msi_data, resolution=ppm_torelance,
-                                            noise_threshold=noise_threshold, blank_pixels_percent=blank_pixels_percent)
+                                            noise_threshold=noise_threshold_list[k], blank_pixels_percent=blank_pixels_percent)
 
         # Export previous five pictures for each sample
         for i in range(min(5, len(ions))):

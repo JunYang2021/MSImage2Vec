@@ -2,6 +2,7 @@ import numpy as np
 import copy
 import cv2
 import os
+import matplotlib.pyplot as plt
 
 
 def pre_alignment(inputs, sample_transform, output_path=None):

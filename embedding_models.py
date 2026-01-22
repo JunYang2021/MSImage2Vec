@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torchvision.models import efficientnet_b0
+from typing import Tuple
 
 
 class ResNetEmbedding(nn.Module):

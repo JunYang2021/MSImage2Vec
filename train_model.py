@@ -17,6 +17,7 @@ from embedding_models import ResNetEmbedding, ViTEmbedding, EfficientNetEmbeddin
 import time
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
+import pickle
 
 
 def divide_train_test(inputs: List, seed=None):
@@ -69,7 +70,7 @@ def _image_distort(img: np.ndarray,
                    alpha_height_ratio=2,
                    sigma_height_ratio=0.12,
                    max_rotation_degree=45) -> np.ndarray:
-    distorted = img.copy()
+    distorted = img.astype(np.float32, copy=True)
     height, width = img.shape
 
     # 1. Random noise (1% of max intensity)
@@ -97,7 +98,21 @@ def _image_distort(img: np.ndarray,
 
         distorted = map_coordinates(distorted, [y_distorted, x_distorted], order=1, mode='constant')
 
-    # 3. Random rotation (-45 to 45 degrees) and scaling (90% to 110%)
+    # 3&4. Random rotation (-45 to 45 degrees) and scaling (90% to 110%), Random translation (up to 10% of image size)
+    angle = random.uniform(-max_rotation_degree, max_rotation_degree)
+    center = (width // 2, height // 2)
+    scale = random.uniform(0.90, 1.1)
+    max_trans_x = int(0.1 * width)
+    max_trans_y = int(0.1 * height)
+    trans_x = random.randint(-max_trans_x, max_trans_x)
+    trans_y = random.randint(-max_trans_y, max_trans_y)
+
+    M = cv2.getRotationMatrix2D(center, angle, scale)
+    M[: 2] += (trans_x, trans_y)
+    distorted = cv2.warpAffine(distorted, M, (width, height),
+                               flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+
+    """# 3. Random rotation (-45 to 45 degrees) and scaling (90% to 110%)
     angle = random.uniform(-max_rotation_degree, max_rotation_degree)
     center = (width // 2, height // 2)
     scale = random.uniform(0.90, 1.1)
@@ -112,7 +127,7 @@ def _image_distort(img: np.ndarray,
     trans_y = random.randint(-max_trans_y, max_trans_y)
     M = np.float32([[1, 0, trans_x], [0, 1, trans_y]])
     distorted = cv2.warpAffine(distorted, M, (width, height),
-                               flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+                               flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)"""
 
     # 5. Random pixel dropout(5 % of pixels)
     dropout_mask = np.random.random((height, width)) < 0.05
@@ -121,37 +136,36 @@ def _image_distort(img: np.ndarray,
     return distorted
 
 
-"""class ImageDataset(Dataset):
-    def __init__(self, inputs: List):
-        self.pairs = []
-        for s_input in inputs:
-            sample_id, shape_mask, _, intensity_array = s_input
-            num_images = len(intensity_array)
-
-            for _ in tqdm(range(pairs_per_sample),
-                          desc=f"Constructing dataset in {sample_id}",
-                          unit="pair"):
-                i, j = random.sample(range(num_images), 2)
-                img1 = intensity_array[i]
-                img2 = intensity_array[j]
-
-                corr = _correlation(img1, img2, shape_mask)
-                # Apply random image distort
-                dist_img1 = _image_distort(img1, shape_mask)
-                dist_img2 = _image_distort(img2, shape_mask)
-                self.pairs.append((dist_img1, dist_img2, corr))
+class ImageDataset(Dataset):
+    def __init__(self, train_data: List, pairs_per_sample: int = 2000):
+        self.train_data = train_data
+        self.pairs_per_sample = pairs_per_sample
+        self.total_pairs = len(train_data) * pairs_per_sample
 
     def __len__(self) -> int:
-        return len(self.pairs)
+        return self.total_pairs
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, float]:
-        img1, img2, corr = self.pairs[idx]
+    def __getitem__(self, idx: int):
+        sample_idx = idx // self.pairs_per_sample
+        s_train = self.train_data[sample_idx]
+        aug_intensity_array = s_train["augmented_images"] # Shape: (n, aug_per_sample, w, h)
+        corr_matrix = s_train["img_corr"] # Shape: (n, n)
 
-        # Convert to tensors and add channel dimension
-        img1_tensor = torch.FloatTensor(img1).unsqueeze(0)  # Shape: 1, height, width
-        img2_tensor = torch.FloatTensor(img2).unsqueeze(0)  # Shape: 1, height, width
+        num_images, num_aug = aug_intensity_array.shape[0], aug_intensity_array.shape[1]
+        i, j = random.sample(range(num_images), 2)
+        i_a, j_a = random.sample(range(num_aug), 2)
+        img1 = aug_intensity_array[i, i_a]
+        img2 = aug_intensity_array[j, j_a]
+        img1 = torch.from_numpy(img1).unsqueeze(0).float()
+        img2 = torch.from_numpy(img2).unsqueeze(0).float()
 
-        return img1_tensor, img2_tensor, corr"""
+        corr = corr_matrix[i, j]
+
+        return (
+            img1, # Shape: 1, height, width
+            img2, # Shape: 1, height, width
+            torch.tensor(corr, dtype=torch.float32)
+        )
 
 
 class TripletImageDataset(Dataset):
@@ -194,7 +208,6 @@ class TripletImageDataset(Dataset):
         self.alpha_height_ratio = alpha_height_ratio
         self.sigma_height_ratio = sigma_height_ratio
         self.max_ratation_degree = max_rotation_degree
-        print('Use Spearman correlation as training goal.')
 
     def __len__(self) -> int:
         return self.total_triplets
@@ -231,7 +244,11 @@ class TripletImageDataset(Dataset):
             pos_img, neg_img = img3, img2
             corr_ap, corr_an = corr13, corr12
 
-        anchor_img = _image_distort(img1, shape_mask)
+        anchor_img = _image_distort(img1, shape_mask,
+                                    alpha_height_ratio=self.alpha_height_ratio,
+                                    sigma_height_ratio=self.sigma_height_ratio,
+                                    max_rotation_degree=self.max_ratation_degree
+                                    )
         pos_img = _image_distort(pos_img, shape_mask,
                                  alpha_height_ratio=self.alpha_height_ratio,
                                  sigma_height_ratio=self.sigma_height_ratio,
@@ -252,7 +269,7 @@ class TripletImageDataset(Dataset):
         )
 
 
-"""class CorrelationLoss(nn.Module):
+class CorrelationLoss(nn.Module):
     # Loss function that measures the difference between embedding cosine similarity
     # and actual image correlation
 
@@ -274,7 +291,7 @@ class TripletImageDataset(Dataset):
         # return loss
         loss = F.mse_loss(cos_sim, target_corr.float())
 
-        return loss"""
+        return loss
 
 
 class JointLoss(nn.Module):
@@ -311,8 +328,8 @@ class Animator:
             self.axes[0], xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
         self.X, self.Y, self.fmts = None, None, fmts
         plt.ion()
-        # self.fig.show()
-        plt.show()
+        self.fig.show()
+        # plt.show()
 
     def add(self, x, y):
         if not hasattr(y, "__len__"):
@@ -355,6 +372,94 @@ def set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend):
     axes.grid()
 
 
+def get_training_test_data(inputs, aug_per_sample=10,
+                            alpha_height_ratio=2,
+                             sigma_height_ratio=0.12,
+                             max_rotation_degree=45):
+    train_inputs, test_inputs = divide_train_test(inputs)
+
+    # Prepare train data
+    train_data = []  # List: [[aug_intensity_array, corr_matrix]]
+    for s_input in train_inputs:
+        sample_id, shape_mask, _, intensity_array = s_input
+        num_images = len(intensity_array)   # Shape: (n, w, h)
+        intensity_array[:, ~shape_mask] = 0
+        # Augmentation
+        aug_intensity_array = np.empty((num_images, aug_per_sample, intensity_array.shape[1], intensity_array.shape[2]),
+                                       dtype=np.float32)  # Shape: (n, aug_per_sample, w, h)
+        for i in tqdm(range(num_images),
+                          desc=f"Training image augmentation in {sample_id}"):
+            img = intensity_array[i]
+            for j in range(aug_per_sample):
+                dist_img = _image_distort(img, shape_mask,
+                                          alpha_height_ratio=alpha_height_ratio,
+                                          sigma_height_ratio=sigma_height_ratio,
+                                          max_rotation_degree=max_rotation_degree
+                                          )
+                aug_intensity_array[i, j] = dist_img
+
+        # Spearman similarity
+        # corr = np.empty((num_images, num_images), dtype=np.float32)  # Shape: (n, n)
+        # for i in tqdm(range(num_images),
+        #                   desc=f"Training image correlation matrix in {sample_id}"):
+        #     img1 = intensity_array[i]
+        #     for j in range(num_images):
+        #         img2 = intensity_array[j]
+        #
+        #         c = _correlation(img1, img2, shape_mask)  # Spearman
+        #         corr[i, j] = c
+        # Pearson similarity
+        X = intensity_array[:, shape_mask]
+        X = X.astype(np.float32, copy=False)
+        X -= X.mean(axis=1, keepdims=True)
+        X /= X.std(axis=1, keepdims=True)
+        corr = X @ X.T / (X.shape[1] - 1) # Pearson for fast evaluation
+        corr = corr.astype(np.float32, copy=False)
+
+        train_data.append({"augmented_images": aug_intensity_array,
+                           "img_corr": corr})
+
+    # Prepare test data
+    test_data = []
+    print('Preparing test data.')
+    for s_input in test_inputs:
+        sample_id, shape_mask, _, intensity_array = s_input
+        intensity_array[:, ~shape_mask] = 0
+
+        # Vectorized tensor conversion (Slow)
+        # imgs = torch.from_numpy(intensity_array).float().unsqueeze(1)  # (N, 1, H, W)
+        # mask = torch.from_numpy(shape_mask).bool()
+        #
+        # imgs[:, 0, ~mask] = 0.0
+        #
+        # img_corr = np.zeros((imgs.shape[0], imgs.shape[0]))
+        # print(f"Computing similarity matrix for {len(intensity_array)} ion images in sample: {sample_id}")
+        # for i in range(imgs.shape[0]):
+        #     for j in range(imgs.shape[0]):
+        #         img_corr[i, j] = _correlation(
+        #             intensity_array[i],
+        #             intensity_array[j],
+        #             shape_mask
+        #         )
+        X = intensity_array[:, shape_mask]
+        X = X.astype(np.float64, copy=False)
+        X -= X.mean(axis=1, keepdims=True)
+        X /= X.std(axis=1, keepdims=True)
+        img_corr = X @ X.T  # Pearson for fast evaluation
+
+        test_data.append({
+            "intensity_array": intensity_array,
+            "num_images": len(intensity_array),
+            "img_corr": img_corr
+        })
+
+    # save_data = (train_data, test_data)
+    # with open(output_file, 'wb') as f:
+    #     pickle.dump(save_data, f)
+    print('Complete train and test data preparation.')
+    return train_data, test_data
+
+
 def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
     list[float], list[float], list[float], list[float], list[float], list[float]]:
     """Train the embedding model
@@ -392,10 +497,10 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
     model = model.to(device)
     criterion = JointLoss(alpha=args.rank_reg_loss_ratio)
     optimizerD = {'Adam': torch.optim.Adam(model.parameters(), lr=args.lr),
-                  'SGD': torch.optim.SGD(lr=args.lr),
-                  'RMSprop': torch.optim.RMSprop(lr=args.lr),
-                  'Adagrad': torch.optim.Adagrad(lr=args.lr),
-                  'AdamW': torch.optim.AdamW(lr=args.lr)}
+                  'SGD': torch.optim.SGD(model.parameters(), lr=args.lr),
+                  'RMSprop': torch.optim.RMSprop(model.parameters(), lr=args.lr),
+                  'Adagrad': torch.optim.Adagrad(model.parameters(), lr=args.lr),
+                  'AdamW': torch.optim.AdamW(model.parameters(), lr=args.lr)}
     optimizer = optimizerD[args.optimizer]
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', patience=3, factor=0.1)
@@ -409,17 +514,17 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
 
     best_test_loss = float('inf')
 
-    animator = Animator(
+    """animator = Animator(
         xlabel='Epoch', ylabel='Loss',
         legend=[
             'Train Total', 'Test Total',
             'Train Reg', 'Test Similarity',
             'Train Rank', 'Test Classification'
         ],
-        xlim=[1, args.epochs],
+        xlim=[1, args.max_epochs],
         fmts=('-', 'm--', 'g-.', 'r', 'c:', 'b-.'),
         figsize=(8, 5)
-    )
+    )"""
 
     # Prepare test images
     test_cache = []
@@ -427,26 +532,32 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
     for s_input in test_inputs:
         sample_id, shape_mask, _, intensity_array = s_input
 
-        # Vectorized tensor conversion
+        # Vectorized tensor conversion (Slow)
         imgs = torch.from_numpy(intensity_array).float().unsqueeze(1)  # (N, 1, H, W)
         mask = torch.from_numpy(shape_mask).bool()
-
+        #
         imgs[:, 0, ~mask] = 0.0
-
-        img_corr = np.zeros((imgs.shape[0], imgs.shape[0]))
-        for i in range(imgs.shape[0]):
-            for j in range(imgs.shape[0]):
-                img_corr[i, j] = _correlation(
-                    intensity_array[i],
-                    intensity_array[j],
-                    shape_mask
-                )
+        #
+        # img_corr = np.zeros((imgs.shape[0], imgs.shape[0]))
+        # print(f"Computing similarity matrix for {len(intensity_array)} ion images in sample: {sample_id}")
+        # for i in range(imgs.shape[0]):
+        #     for j in range(imgs.shape[0]):
+        #         img_corr[i, j] = _correlation(
+        #             intensity_array[i],
+        #             intensity_array[j],
+        #             shape_mask
+        #         )
+        X = intensity_array[:, shape_mask]
+        X = X.astype(np.float64, copy=False)
+        X -= X.mean(axis=1, keepdims=True)
+        X /= X.std(axis=1, keepdims=True)
+        img_corr = X @ X.T
 
         test_cache.append({
             "images": imgs,
             "intensity_array": intensity_array,
             "shape_mask": shape_mask,
-            "num_images": imgs.shape[0],
+            "num_images": len(intensity_array),
             "img_corr": img_corr
         })
 
@@ -462,8 +573,9 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
         running_rank = 0.0
 
         # Training phase
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.epochs} [Train]")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.max_epochs} [Train]")
         for img1, img2, img3, corr12, corr13 in pbar:
+            time1 = time.time()
             img1, img2, img3, corr12, corr13 = img1.to(device), \
                                                img2.to(device), img3.to(device), corr12.to(device), corr13.to(device)
             # print(img1.shape)
@@ -547,16 +659,16 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
         test_sim_log.append(test_spearman_loss)
         test_class_log.append(test_classification_loss)
         test_t1 = time.time()
-        print(f"Epoch {epoch + 1}/{args.epochs}: "
+        print(f"Epoch {epoch + 1}/{args.max_epochs}: "
               f"Train Loss: {train_loss_log[-1]:.4f} (Time: {int(train_t1 - train_t0)} s), Test Loss: {test_loss_log[-1]:.4f} (Time: {int(test_t1 - test_t0)} s)")
 
         # Update learning rate
         scheduler.step(test_loss_log[-1])
-        animator.add(epoch + 1, [
+        """animator.add(epoch + 1, [
             train_loss_log[-1], test_loss_log[-1],
             train_reg_log[-1], test_sim_log[-1],
             train_rank_log[-1], test_class_log[-1]
-        ])
+        ])"""
 
         # Save best model
         if test_loss_log[-1] < best_test_loss - args.early_stop_delta:
@@ -588,6 +700,198 @@ def train_embedding(inputs: List, model: nn.Module, args) -> tuple[
     plt.show()
 
     return train_loss_log, test_loss_log, train_reg_log, test_sim_log, train_rank_log, test_class_log
+
+def train_embedding_pairs(train_data, test_data, model: nn.Module, args) -> tuple[
+    list[float], list[float], list[float], list[float]]:
+    """Train the embedding model
+
+    Args:
+        train_data: train_data from function: get_training_test_data
+        test_data: test_data from function: get_training_test_data
+        model: The embedding model to train
+        args: Training arguments
+        (seed, train_pairs_per_sample, alpha_height_ratio, sigma_height_ratio, max_rotation_degree, batch_size,  optimizer, lr,
+        max_epochs, early_stop_patience, early_stop_delta, output_path, model_data_file)
+
+    Returns:
+        Tuple of (train_loss_log, test_loss_log)
+    """
+    time0 = time.time()
+
+    # Create datasets
+    train_dataset = ImageDataset(train_data,
+                                pairs_per_sample=args.train_pairs_per_sample
+                                )
+
+    # Create dataloaders
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                              shuffle=False, num_workers=0)
+
+    time1 = time.time()
+
+    # Initialize model, loss, and optimizer
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    criterion = CorrelationLoss()
+    optimizerD = {'Adam': torch.optim.Adam(model.parameters(), lr=args.lr),
+                  'SGD': torch.optim.SGD(model.parameters(), lr=args.lr),
+                  'RMSprop': torch.optim.RMSprop(model.parameters(), lr=args.lr),
+                  'Adagrad': torch.optim.Adagrad(model.parameters(), lr=args.lr),
+                  'AdamW': torch.optim.AdamW(model.parameters(), lr=args.lr)}
+    optimizer = optimizerD[args.optimizer]
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', patience=3, factor=0.1)
+
+    train_loss_log = []
+    test_loss_log = []
+    test_sim_log = []
+    test_class_log = []
+
+    best_test_loss = float('inf')
+
+    # animator = Animator(
+    #     xlabel='Epoch', ylabel='Loss',
+    #     legend=[
+    #         'Train Loss', 'Test Total','Test Similarity','Test Classification'
+    #     ],
+    #     xlim=[1, args.max_epochs],
+    #     fmts=('-', 'm--', 'g-.', 'r', 'c:', 'b-.'),
+    #     figsize=(8, 5)
+    # )
+
+    # Training loop
+    early_stop_counter = 0
+    best_epoch = 0
+    best_model_state = None
+    for epoch in range(args.max_epochs):  # Change with early stopping, max epoch is args.epochs
+        model.train()
+        train_t0 = time.time()
+        running_loss = 0.0
+
+        # Training phase
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.max_epochs} [Train]")
+        for img1, img2, corr in pbar:
+            img1, img2, corr = img1.to(device),img2.to(device),  corr.to(device)
+            # print(img1.shape)
+            optimizer.zero_grad()
+
+            # Forward pass
+            # print(img1.shape)
+            emb1 = model(img1)
+            emb2 = model(img2)
+
+            # Calculate loss
+            loss = criterion(emb1, emb2, corr)
+
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * img1.size(0)
+            pbar.set_postfix({'Training loss': loss.item()})
+
+        train_loss_log.append(running_loss / len(train_loader.dataset))
+        train_t1 = time.time()
+
+        # Evaluation phase
+        model.eval()
+        test_t0 = time.time()
+        test_spearman_loss = 0.0
+
+        all_embeddings = []
+        all_labels = []
+
+        with torch.no_grad():
+            for sample_idx, cache in enumerate(test_data):
+                imgs = torch.from_numpy(cache["intensity_array"]).float().unsqueeze(1)  # (N, 1, H, W)
+                # mask = torch.from_numpy(cache["shape_mask"]).bool()
+                # imgs[:, 0, ~mask] = 0.0
+
+                imgs = imgs.to(device)  # (Ni, 1, H, W)
+                num_images = cache["num_images"]
+                img_corr = cache["img_corr"]
+
+                # --- Compute embeddings ---
+                emb = model(imgs)  # (Ni, D)
+                emb = F.normalize(emb, dim=1)
+                emb_sim = (emb @ emb.T).cpu().numpy()
+
+                # --- Spearman loss ---
+                gt_vals = img_corr[np.triu_indices(num_images, k=1)]
+                emb_vals = emb_sim[np.triu_indices(num_images, k=1)]
+
+                spearman_corr, _ = spearmanr(gt_vals, emb_vals)
+                spearman_loss = 1.0 - spearman_corr
+
+                test_spearman_loss += spearman_loss
+
+                all_embeddings.append(emb.cpu())
+                all_labels.append(
+                    torch.full((num_images,), sample_idx, dtype=torch.long)
+                )
+
+            all_embeddings = torch.cat(all_embeddings, dim=0).numpy()
+            all_labels = torch.cat(all_labels, dim=0).numpy()
+
+            clf = LogisticRegression(
+                max_iter=500,
+                multi_class="auto",
+                n_jobs=1
+            )
+
+            try:
+                clf.fit(all_embeddings, all_labels)
+                preds = clf.predict(all_embeddings)
+                classification_loss = accuracy_score(all_labels, preds)
+            except Exception:
+                classification_loss = 1.0  # worst-case penalty
+
+            test_classification_loss = classification_loss
+            test_loss = test_spearman_loss / len(test_data) / 2 + test_classification_loss / 2
+
+        test_loss_log.append(test_loss)
+        test_sim_log.append(test_spearman_loss / len(test_data))
+        test_class_log.append(test_classification_loss)
+        test_t1 = time.time()
+        print(f"Epoch {epoch + 1}/{args.max_epochs}: "
+              f"Train Loss: {train_loss_log[-1]:.4f} (Time: {int(train_t1 - train_t0)} s), Test Loss: {test_loss_log[-1]:.4f} (Time: {int(test_t1 - test_t0)} s)")
+
+        # Update learning rate
+        scheduler.step(test_loss_log[-1])
+        # animator.add(epoch + 1, [
+        #     train_loss_log[-1], test_loss_log[-1],test_sim_log[-1],test_class_log[-1]
+        # ])
+
+        # Save best model
+        if test_loss_log[-1] < best_test_loss - args.early_stop_delta:
+            best_test_loss = test_loss_log[-1]
+            best_epoch = epoch
+            early_stop_counter = 0
+
+            best_model_state = {
+                k: v.cpu().clone() for k, v in model.state_dict().items()
+            }
+
+            torch.save(best_model_state, os.path.join(args.output_path, args.model_data_file))
+        else:
+            early_stop_counter += 1
+        if early_stop_counter >= args.early_stop_patience:
+            print(
+                f"Early stopping triggered at epoch {epoch + 1}. "
+                f"Best epoch: {best_epoch + 1}, "
+                f"Best test loss: {best_test_loss:.4f}"
+            )
+            break
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+
+    time2 = time.time()
+    print(f'Time of preparing data: {time1 - time0}. Time of training model: {time2 - time1}')
+    plt.ioff()
+    plt.show()
+
+    return train_loss_log, test_loss_log,test_sim_log, test_class_log
 
 
 def plot_loss_curve(train_loss, test_loss, train_reg, test_reg, train_rank, test_rank, output_path=None):
@@ -886,7 +1190,7 @@ if __name__ == "__main__":
 
 
     # Bayes optimization
-    '''import optuna
+    r'''import optuna
 
     # Optuna Objective Function
     def objective(trial):
