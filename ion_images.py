@@ -89,6 +89,7 @@ def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_p
     final_ions = []
     for mz, ion in ions.items():
         if ion.real_points >= total_pixels * blank_pixels_percent and np.max(ion.iimage) >= noise_threshold:
+            # print(len(final_ions), np.max(ion.iimage), noise_threshold)
             ion.mzmean = np.sum(ion.mzimage * ion.iimage) / np.sum(ion.iimage)
             final_ions.append(ion)
 
@@ -222,8 +223,8 @@ def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, nois
         plt.close(fig)
 
         # Save inputs to a file in output_directory
-        mz_array = np.array([i.mzmean for i in ions])
-        intensity_array = np.array([i.iimage for i in ions])  # shape: # images, height, width
+        mz_array = np.array([i.mzmean for i in ions], dtype=np.float32)
+        intensity_array = np.array([i.iimage for i in ions], dtype=np.float32)  # shape: # images, height, width
         print(msi_mask.shape, mz_array.shape, intensity_array.shape)
         inputs.append([sample_id, msi_mask, mz_array, intensity_array])
 

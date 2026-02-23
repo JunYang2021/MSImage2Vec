@@ -18,6 +18,7 @@ import time
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 import pickle
+from concurrent.futures import ProcessPoolExecutor
 
 
 def divide_train_test(inputs: List, seed=None):
@@ -69,7 +70,8 @@ def _image_distort(img: np.ndarray,
                    mask: np.ndarray,
                    alpha_height_ratio=2,
                    sigma_height_ratio=0.12,
-                   max_rotation_degree=45) -> np.ndarray:
+                   max_rotation_degree=45,
+                   no_distortion=0.2) -> np.ndarray:
     distorted = img.astype(np.float32, copy=True)
     height, width = img.shape
 
@@ -77,6 +79,8 @@ def _image_distort(img: np.ndarray,
     max_intensity = np.max(distorted)
     noise = np.random.normal(0, 0.01 * max_intensity, (height, width))
     distorted[mask] = np.clip(distorted[mask] + noise[mask], 0, None)
+    if random.random() < no_distortion:
+        return distorted
 
     # 2. Elastic deformations (non-linear distortions)
     if random.random() > 0.5:  # Apply to 50% of images
@@ -108,7 +112,7 @@ def _image_distort(img: np.ndarray,
     trans_y = random.randint(-max_trans_y, max_trans_y)
 
     M = cv2.getRotationMatrix2D(center, angle, scale)
-    M[: 2] += (trans_x, trans_y)
+    M[:, 2] += (trans_x, trans_y)
     distorted = cv2.warpAffine(distorted, M, (width, height),
                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
@@ -372,10 +376,25 @@ def set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend):
     axes.grid()
 
 
+def _augment_worker(args):
+    img, shape_mask, aug_per_sample, alpha, sigma, max_rot, no_d = args
+    out = np.empty((aug_per_sample, *img.shape), dtype=np.float32)
+    for j in range(aug_per_sample):
+        out[j] = _image_distort(
+            img, shape_mask,
+            alpha_height_ratio=alpha,
+            sigma_height_ratio=sigma,
+            max_rotation_degree=max_rot,
+            no_distortion=no_d
+        )
+    return out
+
+
 def get_training_test_data(inputs, aug_per_sample=10,
                             alpha_height_ratio=2,
                              sigma_height_ratio=0.12,
-                             max_rotation_degree=45):
+                             max_rotation_degree=45,
+                           no_distortion=0.2):
     train_inputs, test_inputs = divide_train_test(inputs)
 
     # Prepare train data
@@ -385,7 +404,7 @@ def get_training_test_data(inputs, aug_per_sample=10,
         num_images = len(intensity_array)   # Shape: (n, w, h)
         intensity_array[:, ~shape_mask] = 0
         # Augmentation
-        aug_intensity_array = np.empty((num_images, aug_per_sample, intensity_array.shape[1], intensity_array.shape[2]),
+        """aug_intensity_array = np.empty((num_images, aug_per_sample, intensity_array.shape[1], intensity_array.shape[2]),
                                        dtype=np.float32)  # Shape: (n, aug_per_sample, w, h)
         for i in tqdm(range(num_images),
                           desc=f"Training image augmentation in {sample_id}"):
@@ -396,7 +415,29 @@ def get_training_test_data(inputs, aug_per_sample=10,
                                           sigma_height_ratio=sigma_height_ratio,
                                           max_rotation_degree=max_rotation_degree
                                           )
-                aug_intensity_array[i, j] = dist_img
+                aug_intensity_array[i, j] = dist_img"""
+        num_workers = min(os.cpu_count(), num_images)
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            tasks = [
+                (
+                    intensity_array[i],
+                    shape_mask,
+                    aug_per_sample,
+                    alpha_height_ratio,
+                    sigma_height_ratio,
+                    max_rotation_degree,
+                    no_distortion
+                )
+                for i in range(num_images)
+            ]
+            results = list(
+                tqdm(
+                    executor.map(_augment_worker, tasks),
+                    total=num_images,
+                    desc=f"Training image augmentation in {sample_id}"
+                )
+            )
+        aug_intensity_array = np.stack(results, axis=0)
 
         # Spearman similarity
         # corr = np.empty((num_images, num_images), dtype=np.float32)  # Shape: (n, n)
@@ -424,7 +465,31 @@ def get_training_test_data(inputs, aug_per_sample=10,
     print('Preparing test data.')
     for s_input in test_inputs:
         sample_id, shape_mask, _, intensity_array = s_input
+        num_images = len(intensity_array)  # Shape: (n, w, h)
         intensity_array[:, ~shape_mask] = 0
+
+        num_workers = min(os.cpu_count(), num_images)
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            tasks = [
+                (
+                    intensity_array[i],
+                    shape_mask,
+                    aug_per_sample,
+                    alpha_height_ratio,
+                    sigma_height_ratio,
+                    max_rotation_degree,
+                    no_distortion
+                )
+                for i in range(num_images)
+            ]
+            results = list(
+                tqdm(
+                    executor.map(_augment_worker, tasks),
+                    total=num_images,
+                    desc=f"Test image augmentation in {sample_id}"
+                )
+            )
+        aug_intensity_array = np.stack(results, axis=0)
 
         # Vectorized tensor conversion (Slow)
         # imgs = torch.from_numpy(intensity_array).float().unsqueeze(1)  # (N, 1, H, W)
@@ -445,9 +510,10 @@ def get_training_test_data(inputs, aug_per_sample=10,
         X = X.astype(np.float64, copy=False)
         X -= X.mean(axis=1, keepdims=True)
         X /= X.std(axis=1, keepdims=True)
-        img_corr = X @ X.T  # Pearson for fast evaluation
+        img_corr = X @ X.T / (X.shape[1] - 1) # Pearson for fast evaluation
 
         test_data.append({
+            "augmented_images": aug_intensity_array,
             "intensity_array": intensity_array,
             "num_images": len(intensity_array),
             "img_corr": img_corr
@@ -725,7 +791,7 @@ def train_embedding_pairs(train_data, test_data, model: nn.Module, args) -> tupl
 
     # Create dataloaders
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
-                              shuffle=False, num_workers=0)
+                              shuffle=True, num_workers=0)
 
     time1 = time.time()
 
@@ -821,6 +887,7 @@ def train_embedding_pairs(train_data, test_data, model: nn.Module, args) -> tupl
                 emb_vals = emb_sim[np.triu_indices(num_images, k=1)]
 
                 spearman_corr, _ = spearmanr(gt_vals, emb_vals)
+                print(spearman_corr)
                 spearman_loss = 1.0 - spearman_corr
 
                 test_spearman_loss += spearman_loss
@@ -854,7 +921,7 @@ def train_embedding_pairs(train_data, test_data, model: nn.Module, args) -> tupl
         test_class_log.append(test_classification_loss)
         test_t1 = time.time()
         print(f"Epoch {epoch + 1}/{args.max_epochs}: "
-              f"Train Loss: {train_loss_log[-1]:.4f} (Time: {int(train_t1 - train_t0)} s), Test Loss: {test_loss_log[-1]:.4f} (Time: {int(test_t1 - test_t0)} s)")
+              f"Train Loss: {train_loss_log[-1]:.4f} (Time: {int(train_t1 - train_t0)} s), Test sim Loss: {test_sim_log[-1]:.4f}, Test class Loss: {test_class_log[-1]} (Time: {int(test_t1 - test_t0)} s)")
 
         # Update learning rate
         scheduler.step(test_loss_log[-1])
@@ -892,6 +959,162 @@ def train_embedding_pairs(train_data, test_data, model: nn.Module, args) -> tupl
     plt.show()
 
     return train_loss_log, test_loss_log,test_sim_log, test_class_log
+
+
+def train_embedding_pairs_test_pairs(train_data, test_data, model: nn.Module, args) -> tuple[
+    list[float], list[float]]:
+    """Train the embedding model
+
+    Args:
+        train_data: train_data from function: get_training_test_data
+        test_data: test_data from function: get_training_test_data
+        model: The embedding model to train
+        args: Training arguments
+        (seed, train_pairs_per_sample, test_pairs_per_sample, alpha_height_ratio, sigma_height_ratio, max_rotation_degree, batch_size,  optimizer, lr,
+        max_epochs, early_stop_patience, early_stop_delta, output_path, model_data_file)
+
+    Returns:
+        Tuple of (train_loss_log, test_loss_log)
+    """
+    time0 = time.time()
+
+    # Create datasets
+    train_dataset = ImageDataset(train_data,
+                                pairs_per_sample=args.train_pairs_per_sample
+                                )
+    test_dataset = ImageDataset(test_data,
+                                 pairs_per_sample=args.test_pairs_per_sample
+                                 )
+
+    # Create dataloaders
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                              shuffle=True, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
+                              shuffle=True, num_workers=0)
+
+    time1 = time.time()
+
+    # Initialize model, loss, and optimizer
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    criterion = CorrelationLoss()
+    optimizerD = {'Adam': torch.optim.Adam(model.parameters(), lr=args.lr),
+                  'SGD': torch.optim.SGD(model.parameters(), lr=args.lr),
+                  'RMSprop': torch.optim.RMSprop(model.parameters(), lr=args.lr),
+                  'Adagrad': torch.optim.Adagrad(model.parameters(), lr=args.lr),
+                  'AdamW': torch.optim.AdamW(model.parameters(), lr=args.lr)}
+    optimizer = optimizerD[args.optimizer]
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', patience=3, factor=0.1)
+
+    train_loss_log = []
+    test_loss_log = []
+
+    best_test_loss = float('inf')
+
+    # animator = Animator(
+    #     xlabel='Epoch', ylabel='Loss',
+    #     legend=[
+    #         'Train Loss', 'Test Total','Test Similarity','Test Classification'
+    #     ],
+    #     xlim=[1, args.max_epochs],
+    #     fmts=('-', 'm--', 'g-.', 'r', 'c:', 'b-.'),
+    #     figsize=(8, 5)
+    # )
+
+    # Training loop
+    early_stop_counter = 0
+    best_epoch = 0
+    best_model_state = None
+    for epoch in range(args.max_epochs):  # Change with early stopping, max epoch is args.epochs
+        model.train()
+        train_t0 = time.time()
+        running_loss = 0.0
+
+        # Training phase
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{args.max_epochs} [Train]")
+        for img1, img2, corr in pbar:
+            img1, img2, corr = img1.to(device),img2.to(device),  corr.to(device)
+            # print(img1.shape)
+            optimizer.zero_grad()
+
+            # Forward pass
+            # print(img1.shape)
+            emb1 = model(img1)
+            emb2 = model(img2)
+
+            # Calculate loss
+            loss = criterion(emb1, emb2, corr)
+
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * img1.size(0)
+            pbar.set_postfix({'Training loss': loss.item()})
+
+        train_loss_log.append(running_loss / len(train_loader.dataset))
+        train_t1 = time.time()
+
+        # Evaluation phase
+        model.eval()
+        test_t0 = time.time()
+        test_loss = 0.0
+
+        with torch.no_grad():
+            for img1, img2, corr in test_loader:
+                img1, img2, corr = img1.to(device), img2.to(device), corr.to(device)
+
+                emb1 = model(img1)
+                emb2 = model(img2)
+                # norms = torch.norm(emb1, dim=1)
+                # print("min norm:", norms.min().item(), "max norm:", norms.max().item())
+
+                loss = criterion(emb1, emb2, corr)
+                test_loss += loss.item() * img1.size(0)
+
+        test_loss = test_loss / len(test_loader.dataset)
+        test_loss_log.append(test_loss)
+
+        # Update learning rate
+        scheduler.step(test_loss_log[-1])
+        # animator.add(epoch + 1, [
+        #     train_loss_log[-1], test_loss_log[-1],test_sim_log[-1],test_class_log[-1]
+        # ])
+
+        # Save best model
+        if test_loss_log[-1] < best_test_loss - args.early_stop_delta:
+            best_test_loss = test_loss_log[-1]
+            best_epoch = epoch
+            early_stop_counter = 0
+
+            best_model_state = {
+                k: v.cpu().clone() for k, v in model.state_dict().items()
+            }
+
+            torch.save(best_model_state, os.path.join(args.output_path, args.model_data_file))
+        else:
+            early_stop_counter += 1
+
+        print(f"Epoch {epoch + 1}/{args.max_epochs}: "
+              f"Train Loss: {train_loss_log[-1]:.4f}, Test Loss: {test_loss_log[-1]:.4f}")
+        if early_stop_counter >= args.early_stop_patience:
+            print(
+                f"Early stopping triggered at epoch {epoch + 1}. "
+                f"Best epoch: {best_epoch + 1}, "
+                f"Best test loss: {best_test_loss:.4f}"
+            )
+            break
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+
+    time2 = time.time()
+    print(f'Time of preparing data: {time1 - time0}. Time of training model: {time2 - time1}')
+    plt.ioff()
+    plt.show()
+
+    return train_loss_log, test_loss_log
 
 
 def plot_loss_curve(train_loss, test_loss, train_reg, test_reg, train_rank, test_rank, output_path=None):

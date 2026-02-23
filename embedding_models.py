@@ -213,10 +213,35 @@ class SimpleCNNEmbedding(nn.Module):
 
 # Inception
 class Inception(nn.Module):
+    def __init__(self, in_channels, c1, c2, c3, c4):
+        super().__init__()
+        # Path 1
+        self.p1_1 = nn.Conv2d(in_channels, c1, kernel_size=1)
+        # Path 2
+        self.p2_1 = nn.Conv2d(in_channels, c2[0], kernel_size=1)
+        self.p2_2 = nn.Conv2d(c2[0], c2[1], kernel_size=3, padding=1)
+        # Path 3
+        self.p3_1 = nn.Conv2d(in_channels, c3[0], kernel_size=1)
+        self.p3_2 = nn.Conv2d(c3[0], c3[1], kernel_size=5, padding=2)
+        # Path 4
+        self.p4_1 = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        self.p4_2 = nn.Conv2d(in_channels, c4, kernel_size=1)
+
+    def forward(self, x):
+        p1 = F.relu(self.p1_1(x))
+        p2 = F.relu(self.p2_2(F.relu(self.p2_1(x))))
+        p3 = F.relu(self.p3_2(F.relu(self.p3_1(x))))
+        p4 = F.relu(self.p4_2(self.p4_1(x)))
+        # Channel dimension
+        return torch.cat((p1, p2, p3, p4), dim=1)
+
+
+class Inception_p(nn.Module):
     """
-    Ratio-based Inception block.
-    Branch output channels are computed from out_channels * ratios.
-    """
+        Ratio-based Inception block.
+        Branch output channels are computed from out_channels * ratios.
+        """
+
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
@@ -272,6 +297,7 @@ class Inception(nn.Module):
 
         self.dropout = nn.Dropout2d(dropout_p) if dropout_p > 0 else nn.Identity()
 
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.cat(
             (self.p1(x), self.p2(x), self.p3(x), self.p4(x)),
@@ -281,6 +307,46 @@ class Inception(nn.Module):
 
 
 class MultiscaleEmbedding(nn.Module):
+    def __init__(self, embedding_dim: int = 28):
+        super().__init__()
+        # 初始特征提取 + 下采样
+
+        # Stem
+        self.stem = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3),  # 输出大小约为 1/2
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)  # 输出大小约为 1/4
+        )
+
+        # 添加多个 Inception 块来捕捉多尺度信息
+        self.inception_block1 = Inception(64, 32, (48, 64), (8, 16), 16)  # -> 128 channels
+        self.inception_block2 = Inception(128, 64, (64, 96), (16, 32), 32)  # -> 224 channels
+        self.inception_block3 = Inception(224, 64, (64, 96), (16, 32), 32)  # -> 224 channels
+        self.inception_block4 = Inception(224, 64, (96, 128), (32, 64), 32)  # -> 288 channels
+
+        self.mid_pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)  # 空间减半
+        # 使用 1x1 卷积调整通道数（可选）
+        self.conv_projection = nn.Conv2d(288, 256, kernel_size=1)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(256, embedding_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.inception_block1(x)
+        x = self.mid_pool(x)
+        x = self.inception_block2(x)
+        x = self.inception_block3(x)
+        x = self.inception_block4(x)
+        x = F.relu(self.conv_projection(x))  # 调整为统一通道数
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return F.normalize(x, p=2, dim=1)  # 单位化嵌入
+
+
+class MultiscaleEmbedding_p(nn.Module):
     def __init__(self,
                  embedding_dim: int = 28,
                  num_inception_blocks: int = 4,
@@ -292,6 +358,7 @@ class MultiscaleEmbedding(nn.Module):
                  in_channels: int = 1,
                  ):
         super().__init__()
+        # 初始特征提取 + 下采样
 
         # Stem
         self.stem = nn.Sequential(
@@ -307,7 +374,7 @@ class MultiscaleEmbedding(nn.Module):
 
         for i in range(num_inception_blocks):
             inception_blocks.append(
-                Inception(
+                Inception_p(
                     in_channels=current_channels,
                     out_channels=inception_out_channels,
                     branch_ratios=branch_ratios,
@@ -315,15 +382,12 @@ class MultiscaleEmbedding(nn.Module):
                     dropout_p=dropout_p,
                 )
             )
-
             current_channels = inception_out_channels
-
             # Optional downsampling between blocks (except last)
             if i < num_inception_blocks - 1:
                 inception_blocks.append(
                     nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
                 )
-
         self.inception_stack = nn.Sequential(*inception_blocks)
 
         # Projection

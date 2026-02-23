@@ -72,18 +72,40 @@ def display_xic(p, mz):
     plt.show()
 
 
-def display_spectrum(p, x, y):
+def display_spectrum(p, x, y, mzmin=None, mzmax=None):
     for idx, (xx, yy, _) in enumerate(p.coordinates):
         if xx == x and yy == y:
             mz, i = p.getspectrum(idx)
-            print("Length of spectrum point: ", mz.shape)
-            plt.figure(figsize=(8, 5))  # Adjust the figure size as needed
-            plt.stem(mz, i, linefmt='r-', markerfmt='ro', basefmt='r-')  # Plot with red lines and circles
+            print("Length of spectrum point:", mz.shape)
+
+            # Apply m/z filtering if needed
+            if mzmin is not None or mzmax is not None:
+                mask = np.ones_like(mz, dtype=bool)
+                if mzmin is not None:
+                    mask &= mz >= mzmin
+                if mzmax is not None:
+                    mask &= mz <= mzmax
+                mz_plot = mz[mask]
+                i_plot = i[mask]
+            else:
+                mz_plot = mz
+                i_plot = i
+
+            plt.figure(figsize=(8, 5))
+            plt.stem(
+                mz_plot,
+                i_plot,
+                linefmt='r-',
+                markerfmt='ro',
+                basefmt='r-'
+            )
             plt.title('Mass Spectrum')
             plt.xlabel('m/z')
             plt.ylabel('Intensity')
             plt.grid(True)
             plt.show()
+            # return  # stop after finding the matching (x, y)
+
 
 
 if __name__ == '__main__':

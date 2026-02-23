@@ -243,7 +243,7 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_p
 
     # k-means clustering
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    cluster_labels = kmeans.fit_predict(pca_results)  # shape: (total_ions,)
+    cluster_labels = kmeans.fit_predict(pca_results) + 1  # shape: (total_ions,)
 
     # 4. Plots for samples and clusters
     plt.figure(figsize=(4, 7.5))
@@ -321,6 +321,85 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_p
     return pca_results, sample_ids, mz_values, cluster_labels
 
 
+def single_files_pca_kmeans(outputs_final, display_file, file_list=None, n_clusters=8, output_path=None):
+    if file_list is None:
+        file_list = [i[0] for i in outputs_final]
+        temp_outputs = outputs_final
+    else:
+        temp_outputs = [s_output for s_output in outputs_final if s_output[0] in file_list]
+
+    # 2. 合并所有样本的嵌入向量和标签
+    all_embeddings = []
+    sample_ids = []
+    mz_values = []
+
+    for s_output in temp_outputs:
+        sample_id = s_output[0]
+        embeddings = s_output[2]  # shape: (n_ions, embed_dim)
+        mz = s_output[1]  # m/z array
+
+        all_embeddings.append(embeddings)
+        sample_ids.extend([sample_id] * len(embeddings))
+        mz_values.extend(mz)
+
+    all_embeddings = np.vstack(all_embeddings)  # shape: (total_ions, embed_dim)
+
+    # 3. 运行PCA降维（降至2D）
+    from sklearn.decomposition import PCA
+    from sklearn.cluster import KMeans
+    import matplotlib.pyplot as plt
+    pca = PCA(n_components=2, random_state=42)
+    pca_results = pca.fit_transform(all_embeddings)  # shape: (total_ions, 2)
+
+    mask = np.array(sample_ids) == display_file
+    pca_single = pca_results[mask]
+    mz_single = np.array(mz_values)[mask]
+
+    # k-means clustering (apply on one file)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    cluster_labels = kmeans.fit_predict(pca_single) + 1  # shape: (total_ions,)
+
+    # 4. Plots for samples and clusters
+    plt.figure(figsize=(3.5, 3.5))
+
+    bg_mask = ~mask  # 不是 display_file 的点
+
+    plt.scatter(
+        pca_results[bg_mask, 0],
+        pca_results[bg_mask, 1],
+        c="lightgray",
+        s=2,
+        alpha=0.9,
+        linewidths=0
+    )
+
+    cluster_palette = sns.color_palette("husl", n_clusters)
+    cluster_colors = [cluster_palette[label - 1] for label in cluster_labels]
+
+    plt.scatter(
+        pca_single[:, 0],
+        pca_single[:, 1],
+        c=cluster_colors,
+        s=3
+    )
+
+    # 添加聚类中心的标记
+    centers = kmeans.cluster_centers_
+    # plt.scatter(centers[:, 0], centers[:, 1], c='black', s=200, alpha=0.8, marker='X')
+    for i, center in enumerate(centers, start=1):
+        plt.text(center[0], center[1], str(i), fontsize=10, ha='center', va='center', color='black')
+
+    plt.xlabel(f"PC1 (Variance: {pca.explained_variance_ratio_[0]:.2f})")
+    plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.2f})")
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return pca_single, mz_single, cluster_labels  # Return only the required file
+
+
 def clusters_visualization(original_inputs, sample_ids, cluster_labels, output_folder):
     """
 
@@ -374,7 +453,7 @@ def clusters_visualization(original_inputs, sample_ids, cluster_labels, output_f
             plt.close()
 
 
-def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, display_cluster, output_path=None):
+def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, display_cluster, n_cols=3, output_path=None):
     """
 
     :param original_inputs:
@@ -398,14 +477,16 @@ def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, di
         for image_data_ind in range(s_input[3].shape[0]):
             image_pos.append([sample_ind, image_data_ind])
 
-    n_cols = 3
     valid_samples = [s for s in unique_samples if cluster_sample_indices[s]]
     n_plots = len(valid_samples)
     import math
     n_rows = math.ceil(n_plots / n_cols)
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(1.8 * n_cols, 1.5 * n_rows))
-    axes = axes.flatten()  # 变成 1D 列表，方便索引
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.3 * n_cols, 3.3 * n_rows))
+    if n_rows == 1 and n_cols == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()  # 变成 1D 列表，方便索引
 
     for idx, sample in enumerate(valid_samples):
         indices = cluster_sample_indices[sample]
@@ -420,9 +501,9 @@ def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, di
         cluster_images = np.mean(cluster_images, axis=0)
 
         ax = axes[idx]
-        img = ax.imshow(cluster_images, cmap='magma')
+        img = ax.imshow(cluster_images, cmap='viridis')
         # img = ax.imshow(np.rot90(cluster_images, k=1), cmap='magma')
-        ax.set_title(f"Cluster {display_cluster} - {sample}")
+        ax.set_title(f"Cluster {display_cluster} - {sample}", fontsize=10)
         ax.axis('off')
 
     for j in range(idx + 1, len(axes)):
