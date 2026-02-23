@@ -16,6 +16,7 @@ plt.rcParams.update({
 import os
 import pickle
 from tqdm import tqdm
+import pyopenms as oms
 
 
 class IonImage:
@@ -126,6 +127,68 @@ def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_p
                 print(tar_ion_image.iimage.max())
                 if tar_ion_image.iimage.max() > 0:
                     final_ions.append(tar_ion_image)
+
+    return final_ions, mask
+
+
+def get_ion_images_profile(msi_parser: ImzMLParser, resolution, noise_threshold, blank_pixels_percent):
+    # Max intensity of an image should be greater than noise_threshold
+    coord = np.array(msi_parser.coordinates)
+    width = coord[:, 0].max() - coord[:, 0].min() + 1
+    height = coord[:, 1].max() - coord[:, 1].min() + 1
+    x_minus = coord[:, 0].min()
+    y_minus = coord[:, 1].min()
+    mask = np.zeros((height, width), dtype=bool)
+
+    L = len(msi_parser.coordinates)
+
+    ions = OOBTree()
+
+    # OpenMS peak picker
+    picker = oms.PeakPickerHiRes() # 可以修改参数
+
+    for idx, (x, y, _) in enumerate(tqdm(msi_parser.coordinates, total=L, desc="Processing coordinates")):
+        mz, intensity = msi_parser.getspectrum(idx)
+
+        spec = oms.MSSpectrum()
+        spec.set_peaks([mz, intensity])
+        picked = oms.MSSpectrum()
+        picker.pick(spec, picked)
+
+        mz_c, int_c = picked.get_peaks()
+        for m, i in zip(mz_c, int_c):
+            if i > 0:
+                mask[y - y_minus, x - x_minus] = True
+                delta_mz = resolution / (10 ** 6) * m
+                closest_mz, closest_item = None, None
+                for candidate_mz, candidate_item in ions.items(min=m - delta_mz, max=m + delta_mz):
+                    if closest_mz is None or abs(candidate_mz - m) < abs(closest_mz - m):
+                        closest_mz, closest_item = candidate_mz, candidate_item
+
+                if closest_mz is None:
+                    ions[m] = IonImage(m, width, height)
+                    ions[m].iimage[y - y_minus, x - x_minus] = i
+                else:
+                    if closest_item.iimage[y - y_minus, x - x_minus] == 0:
+                        closest_item.mzimage[y - y_minus, x - x_minus] = m
+                        closest_item.iimage[y - y_minus, x - x_minus] = i
+                        closest_item.real_points += 1
+                    else:
+                        closest_item.mzimage[y - y_minus, x - x_minus] = (closest_item.mzimage[
+                                                                              y - y_minus, x - x_minus] *
+                                                                          closest_item.iimage[
+                                                                              y - y_minus, x - x_minus] + m * i) / (
+                                                                                 closest_item.iimage[
+                                                                                     y - y_minus, x - x_minus] + i)
+                        closest_item.iimage[y - y_minus, x - x_minus] = closest_item.iimage[
+                                                                            y - y_minus, x - x_minus] + i
+
+    total_pixels = idx + 1
+    final_ions = []
+    for mz, ion in ions.items():
+        if ion.real_points >= total_pixels * blank_pixels_percent and np.max(ion.iimage) >= noise_threshold:
+            ion.mzmean = np.sum(ion.mzimage * ion.iimage) / np.sum(ion.iimage)
+            final_ions.append(ion)
 
     return final_ions, mask
 
