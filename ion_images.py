@@ -1,8 +1,11 @@
+import scanpy as sc
 import numpy as np
 from pyimzml.ImzMLParser import ImzMLParser
 from BTrees.OOBTree import OOBTree
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from scipy.interpolate import griddata
+
 
 plt.rcParams.update({
     "font.family": "Arial",
@@ -44,9 +47,7 @@ class IonImage:
             plt.colorbar(im, ax=ax)
 
 
-def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_pixels_percent, target_mz_list=None,
-                   target_mz_name=None):
-    # Ensure the length of 'target_mz_list' and 'target_mz_name' is identical
+def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_pixels_percent, target_mz_list=None):
     # Max intensity of an image should be greater than noise_threshold
     coord = np.array(msi_parser.coordinates)
     width = coord[:, 0].max() - coord[:, 0].min() + 1
@@ -95,12 +96,13 @@ def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_p
             final_ions.append(ion)
 
     if target_mz_list:
-        for target_mz, target_name in zip(target_mz_list, target_mz_name):
+        print("Start targeted extracting.")
+        for target_mz in target_mz_list:
+
             delta_mz = resolution / 1e6 * target_mz
             matched = False
             for ion in final_ions:
                 if abs(ion.mzmean - target_mz) <= delta_mz:
-                    ion.compound = target_name
                     matched = True
                     break
             if not matched:
@@ -123,15 +125,121 @@ def get_ion_images(msi_parser: ImzMLParser, resolution, noise_threshold, blank_p
                                                                                      y - y_minus, x - x_minus] + i
                 tar_ion_image.mzmean = np.sum(tar_ion_image.mzimage * tar_ion_image.iimage) / np.sum(
                     tar_ion_image.iimage)
-                tar_ion_image.compound = target_name
-                print(tar_ion_image.iimage.max())
                 if tar_ion_image.iimage.max() > 0:
+                    print(f"m/z {target_mz} extracted with maximum intensity {tar_ion_image.iimage.max()}.")
                     final_ions.append(tar_ion_image)
 
     return final_ions, mask
 
 
-def get_ion_images_profile(msi_parser: ImzMLParser, resolution, noise_threshold, blank_pixels_percent):
+def get_ion_images_only_tar_legacy(msi_parser: ImzMLParser, resolution, target_mz_list):
+    # Max intensity of an image should be greater than noise_threshold
+    coord = np.array(msi_parser.coordinates)
+    width = coord[:, 0].max() - coord[:, 0].min() + 1
+    height = coord[:, 1].max() - coord[:, 1].min() + 1
+    x_minus = coord[:, 0].min()
+    y_minus = coord[:, 1].min()
+    mask = np.zeros((height, width), dtype=bool)
+
+    L = len(msi_parser.coordinates)
+
+    for idx, (x, y, _) in enumerate(tqdm(msi_parser.coordinates, total=L, desc="Processing coordinates")):
+        for m, i in zip(*msi_parser.getspectrum(idx)):
+            if i > 0:
+                mask[y - y_minus, x - x_minus] = True
+
+    final_ions = []
+    for target_mz in target_mz_list:
+        delta_mz = resolution / 1e6 * target_mz
+        matched = False
+        for ion in final_ions:
+            if abs(ion.mzmean - target_mz) <= delta_mz:
+                matched = True
+                break
+        if not matched:
+            tar_ion_image = IonImage(target_mz, width, height)
+            for idx, (x, y, _) in enumerate(msi_parser.coordinates):
+                for m, i in zip(*msi_parser.getspectrum(idx)):
+                    if target_mz - delta_mz < m < target_mz + delta_mz:
+                        if tar_ion_image.iimage[y - y_minus, x - x_minus] == 0:
+                            tar_ion_image.mzimage[y - y_minus, x - x_minus] = m
+                            tar_ion_image.iimage[y - y_minus, x - x_minus] = i
+                            tar_ion_image.real_points += 1
+                        else:
+                            tar_ion_image.mzimage[y - y_minus, x - x_minus] = (tar_ion_image.mzimage[
+                                                                                   y - y_minus, x - x_minus] *
+                                                                               tar_ion_image.iimage[
+                                                                                   y - y_minus, x - x_minus] + m * i) / (
+                                                                                      tar_ion_image.iimage[
+                                                                                          y - y_minus, x - x_minus] + i)
+                            tar_ion_image.iimage[y - y_minus, x - x_minus] = tar_ion_image.iimage[
+                                                                                 y - y_minus, x - x_minus] + i
+            tar_ion_image.mzmean = np.sum(tar_ion_image.mzimage * tar_ion_image.iimage) / np.sum(
+                tar_ion_image.iimage)
+            if tar_ion_image.iimage.max() > 0:
+                print(f"m/z {target_mz} extracted with maximum intensity {tar_ion_image.iimage.max()}.")
+                final_ions.append(tar_ion_image)
+
+    return final_ions, mask
+
+
+def get_ion_images_only_tar(msi_parser, resolution, target_mz_list):
+    coord = np.array(msi_parser.coordinates)
+    width = coord[:, 0].max() - coord[:, 0].min() + 1
+    height = coord[:, 1].max() - coord[:, 1].min() + 1
+    x_minus = coord[:, 0].min()
+    y_minus = coord[:, 1].min()
+
+    L = len(coord)
+
+    target_mz = np.array(target_mz_list)
+    delta = resolution / 1e6 * target_mz
+    lower = target_mz - delta
+    upper = target_mz + delta
+
+    ion_images = [IonImage(mz, width, height) for mz in target_mz]
+
+    mask = np.zeros((height, width), dtype=bool)
+
+    for idx, (x, y, _) in enumerate(tqdm(coord, total=L)):
+        mz_vals, intensities = msi_parser.getspectrum(idx)
+
+        # mask calculation
+        if np.any(intensities > 0):
+            mask[y - y_minus, x - x_minus] = True
+
+        # vectorized matching
+        match = (mz_vals[:, None] > lower) & (mz_vals[:, None] < upper)
+
+        peak_idx, target_idx = np.where(match)
+
+        for p, t in zip(peak_idx, target_idx):
+            m = mz_vals[p]
+            i = intensities[p]
+
+            img = ion_images[t]
+            yy = y - y_minus
+            xx = x - x_minus
+
+            if img.iimage[yy, xx] == 0:
+                img.mzimage[yy, xx] = m
+                img.iimage[yy, xx] = i
+                img.real_points += 1
+            else:
+                old_i = img.iimage[yy, xx]
+                img.mzimage[yy, xx] = (img.mzimage[yy, xx] * old_i + m * i) / (old_i + i)
+                img.iimage[yy, xx] += i
+
+    final_ions = []
+    for img in ion_images:
+        if img.iimage.max() > 0:
+            img.mzmean = np.sum(img.mzimage * img.iimage) / np.sum(img.iimage)
+            final_ions.append(img)
+
+    return final_ions, mask
+
+
+def get_ion_images_profile(msi_parser: ImzMLParser, resolution, noise_threshold, blank_pixels_percent, target_mz_list=None):
     # Max intensity of an image should be greater than noise_threshold
     coord = np.array(msi_parser.coordinates)
     width = coord[:, 0].max() - coord[:, 0].min() + 1
@@ -145,8 +253,10 @@ def get_ion_images_profile(msi_parser: ImzMLParser, resolution, noise_threshold,
     ions = OOBTree()
 
     # OpenMS peak picker
-    picker = oms.PeakPickerHiRes() # 可以修改参数
+    picker = oms.PeakPickerHiRes()  # 可以修改参数
 
+    centroided_mz_list = []
+    centroided_int_list = []
     for idx, (x, y, _) in enumerate(tqdm(msi_parser.coordinates, total=L, desc="Processing coordinates")):
         mz, intensity = msi_parser.getspectrum(idx)
 
@@ -156,6 +266,9 @@ def get_ion_images_profile(msi_parser: ImzMLParser, resolution, noise_threshold,
         picker.pick(spec, picked)
 
         mz_c, int_c = picked.get_peaks()
+        centroided_mz_list.append(mz_c)
+        centroided_int_list.append(int_c)
+
         for m, i in zip(mz_c, int_c):
             if i > 0:
                 mask[y - y_minus, x - x_minus] = True
@@ -189,6 +302,41 @@ def get_ion_images_profile(msi_parser: ImzMLParser, resolution, noise_threshold,
         if ion.real_points >= total_pixels * blank_pixels_percent and np.max(ion.iimage) >= noise_threshold:
             ion.mzmean = np.sum(ion.mzimage * ion.iimage) / np.sum(ion.iimage)
             final_ions.append(ion)
+
+    if target_mz_list:
+        print("Start targeted extracting.")
+        for target_mz in target_mz_list:
+            delta_mz = resolution / 1e6 * target_mz
+            matched = False
+            for ion in final_ions:
+                if abs(ion.mzmean - target_mz) <= delta_mz:
+                    matched = True
+                    break
+            if not matched:
+                tar_ion_image = IonImage(target_mz, width, height)
+                for idx, (x, y, _) in enumerate(msi_parser.coordinates):
+                    mz_c = centroided_mz_list[idx]
+                    int_c = centroided_int_list[idx]
+                    for m, i in zip(mz_c, int_c):
+                        if target_mz - delta_mz < m < target_mz + delta_mz:
+                            if tar_ion_image.iimage[y - y_minus, x - x_minus] == 0:
+                                tar_ion_image.mzimage[y - y_minus, x - x_minus] = m
+                                tar_ion_image.iimage[y - y_minus, x - x_minus] = i
+                                tar_ion_image.real_points += 1
+                            else:
+                                tar_ion_image.mzimage[y - y_minus, x - x_minus] = (tar_ion_image.mzimage[
+                                                                                       y - y_minus, x - x_minus] *
+                                                                                   tar_ion_image.iimage[
+                                                                                       y - y_minus, x - x_minus] + m * i) / (
+                                                                                          tar_ion_image.iimage[
+                                                                                              y - y_minus, x - x_minus] + i)
+                                tar_ion_image.iimage[y - y_minus, x - x_minus] = tar_ion_image.iimage[
+                                                                                     y - y_minus, x - x_minus] + i
+                tar_ion_image.mzmean = np.sum(tar_ion_image.mzimage * tar_ion_image.iimage) / np.sum(
+                    tar_ion_image.iimage)
+                if tar_ion_image.iimage.max() > 0:
+                    print(f"m/z {target_mz} extracted with maximum intensity {tar_ion_image.iimage.max()}.")
+                    final_ions.append(tar_ion_image)
 
     return final_ions, mask
 
@@ -225,7 +373,7 @@ def extract_ion_images(msi_parser: ImzMLParser, target_mz, resolution):
 
 
 def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, noise_threshold, blank_pixels_percent,
-                           output_directory, target_mz_list=None, target_mz_name=None):
+                           output_directory, target_mz_list=None):
     """
 
     :param output_directory: Directory to save the detected ion images and display the previous five images
@@ -254,11 +402,13 @@ def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, nois
         msi_data = ImzMLParser(sample_path)
         if target_mz_list:
             ions, msi_mask = get_ion_images(msi_data, resolution=ppm_torelance,
-                                            noise_threshold=noise_threshold_list[k], blank_pixels_percent=blank_pixels_percent,
-                                            target_mz_list=target_mz_list[k], target_mz_name=target_mz_name[k])
+                                            noise_threshold=noise_threshold_list[k],
+                                            blank_pixels_percent=blank_pixels_percent,
+                                            target_mz_list=target_mz_list[k])
         else:
             ions, msi_mask = get_ion_images(msi_data, resolution=ppm_torelance,
-                                            noise_threshold=noise_threshold_list[k], blank_pixels_percent=blank_pixels_percent)
+                                            noise_threshold=noise_threshold_list[k],
+                                            blank_pixels_percent=blank_pixels_percent)
 
         # Export previous five pictures for each sample
         for i in range(min(5, len(ions))):
@@ -294,6 +444,279 @@ def get_samples_ion_images(sample_path_list, sample_id_list, ppm_torelance, nois
     inputs_output_path = os.path.join(output_directory, "input_data.pkl")
     with open(inputs_output_path, 'wb') as f:
         pickle.dump(inputs, f)
+
+
+def get_samples_ion_images_only_tar(sample_path_list, sample_id_list, ppm_torelance, output_directory, target_mz_list):
+    """
+
+    :param output_directory: Directory to save the detected ion images and display the previous five images
+    :param sample_path_list: list of samples files
+    :param sample_id_list:  list of samples ids
+    :param ppm_torelance: mass tolerance in parts per million
+    :return:
+    """
+    os.makedirs(output_directory, exist_ok=True)
+
+    n_samples = len(sample_path_list)
+
+    inputs = []
+    for k, (sample_id, sample_path) in enumerate(zip(sample_id_list, sample_path_list)):
+        print(f'Exacting ion images from {sample_id}...')
+        msi_data = ImzMLParser(sample_path)
+        ions, msi_mask = get_ion_images_only_tar(msi_data, resolution=ppm_torelance,
+                                                target_mz_list=target_mz_list[k])
+
+        # Export previous five pictures for each sample
+        for i in range(min(5, len(ions))):
+            fig, ax = plt.subplots()
+            im = ax.imshow(ions[i].iimage, cmap='magma')
+            ax.set_title(f'm/z: {ions[i].mzmean:.4f} name: {ions[i].compound}')
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+            plt.colorbar(im, ax=ax)
+
+            # Save the plot to output directory
+            output_path = os.path.join(output_directory, f"{sample_id}_{i}.png")
+            fig.savefig(output_path)
+            plt.close(fig)
+
+        # Export mask for each sample
+        fig, ax = plt.subplots()
+        im = ax.imshow(msi_mask)
+        ax.set_title(f'MSI mask for {sample_id}')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        plt.colorbar(im, ax=ax)
+        output_path = os.path.join(output_directory, f"{sample_id}_image_mask.png")
+        fig.savefig(output_path)
+        plt.close(fig)
+
+        # Save inputs to a file in output_directory
+        mz_array = np.array([i.mzmean for i in ions], dtype=np.float32)
+        intensity_array = np.array([i.iimage for i in ions], dtype=np.float32)  # shape: # images, height, width
+        print(msi_mask.shape, mz_array.shape, intensity_array.shape)
+        inputs.append([sample_id, msi_mask, mz_array, intensity_array])
+
+    inputs_output_path = os.path.join(output_directory, "input_data.pkl")
+    with open(inputs_output_path, 'wb') as f:
+        pickle.dump(inputs, f)
+
+
+def get_samples_ion_images_profile(sample_path_list, sample_id_list, ppm_torelance, noise_threshold,
+                                   blank_pixels_percent,
+                                   output_directory, target_mz_list=None):
+    """
+
+    :param output_directory: Directory to save the detected ion images and display the previous five images
+    :param sample_path_list: list of samples files
+    :param sample_id_list:  list of samples ids
+    :param ppm_torelance: mass tolerance in parts per million
+    :param noise_threshold: intensity threshold for noise filtering
+    :param blank_pixels_percent: percentage of blank pixels allowed
+    :return:
+    """
+    os.makedirs(output_directory, exist_ok=True)
+
+    n_samples = len(sample_path_list)
+    if isinstance(noise_threshold, (list, tuple, np.ndarray)):
+        if len(noise_threshold) != n_samples:
+            raise ValueError(
+                f"Length of noise_threshold ({len(noise_threshold)}) must match "
+                f"number of samples ({n_samples})."
+            )
+        noise_threshold_list = list(noise_threshold)
+    else:
+        noise_threshold_list = [noise_threshold] * n_samples
+    inputs = []
+    for k, (sample_id, sample_path) in enumerate(zip(sample_id_list, sample_path_list)):
+        print(f'Obtaining ion images from {sample_id}...')
+        msi_data = ImzMLParser(sample_path)
+        if target_mz_list:
+            ions, msi_mask = get_ion_images_profile(msi_data, resolution=ppm_torelance,
+                                            noise_threshold=noise_threshold_list[k],
+                                            blank_pixels_percent=blank_pixels_percent,
+                                            target_mz_list=target_mz_list[k])
+        else:
+            ions, msi_mask = get_ion_images_profile(msi_data, resolution=ppm_torelance,
+                                            noise_threshold=noise_threshold_list[k],
+                                            blank_pixels_percent=blank_pixels_percent)
+
+        # Export previous five pictures for each sample
+        for i in range(min(5, len(ions))):
+            fig, ax = plt.subplots()
+            im = ax.imshow(ions[i].iimage, cmap='magma')
+            ax.set_title(f'm/z: {ions[i].mzmean:.4f} name: {ions[i].compound}')
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+            plt.colorbar(im, ax=ax)
+
+            # Save the plot to output directory
+            output_path = os.path.join(output_directory, f"{sample_id}_{i}.png")
+            fig.savefig(output_path)
+            plt.close(fig)
+
+        # Export mask for each sample
+        fig, ax = plt.subplots()
+        im = ax.imshow(msi_mask)
+        ax.set_title(f'MSI mask for {sample_id}')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        plt.colorbar(im, ax=ax)
+        output_path = os.path.join(output_directory, f"{sample_id}_image_mask.png")
+        fig.savefig(output_path)
+        plt.close(fig)
+
+        # Save inputs to a file in output_directory
+        mz_array = np.array([i.mzmean for i in ions], dtype=np.float32)
+        intensity_array = np.array([i.iimage for i in ions], dtype=np.float32)  # shape: # images, height, width
+        print(msi_mask.shape, mz_array.shape, intensity_array.shape)
+        inputs.append([sample_id, msi_mask, mz_array, intensity_array])
+
+    inputs_output_path = os.path.join(output_directory, "input_data.pkl")
+    with open(inputs_output_path, 'wb') as f:
+        pickle.dump(inputs, f)
+
+
+def get_spatial_gene_images_profile(
+        filtered_feature_bc_matrix_path,
+        spatial_path,
+        sample_id,
+        output_directory,
+        gene_subset=None,
+        min_expression=0,
+        min_nonzero_pixel_ratio=0.2,
+        log1p=True,
+        method='linear'
+):
+    """
+    Convert spatial transcriptomics data into MSI-like gene image tensor.
+    For Visium technology (pointy-top hexagonal orientations).
+
+    min_nonzero_pixel_ratio:
+        minimum fraction of pixels with non-zero expression required to keep gene
+    速度较慢，可以先过滤基因，再进行interpolation
+    """
+    os.makedirs(output_directory, exist_ok=True)
+
+    print(f"Loading ST data for {sample_id}...")
+
+    # 1. Load data
+    adata = sc.read_10x_mtx(
+        filtered_feature_bc_matrix_path,
+        var_names='gene_symbols',
+        cache=False
+    )
+
+    # 2. Load spatial
+    import pandas as pd
+    pos = pd.read_csv(
+        os.path.join(spatial_path, "tissue_positions_list.csv"),
+        header=None
+    )
+
+    pos.columns = [
+        "barcode",
+        "in_tissue",
+        "array_row",
+        "array_col",
+        "pxl_row",
+        "pxl_col"
+    ]
+
+    pos = pos.set_index("barcode")
+    adata.obs = adata.obs.join(pos)
+
+    # 3. Subset genes
+    if gene_subset is not None:
+        adata = adata[:, gene_subset]
+
+    genes = np.array(adata.var_names)
+
+    # 4. Precompute geometry
+    in_tissue = adata.obs["in_tissue"].values.astype(bool)
+
+    x = adata.obs["array_col"].values.astype(float)
+    x = x[in_tissue]
+    y_raw = adata.obs["array_row"].values.astype(float)
+    y_raw = y_raw[in_tissue]
+
+    y = y_raw * np.sqrt(3)
+
+    # grid
+    x_unique = np.arange(x.min(), x.max() + 1)
+    y_unique = np.arange(y.min(), y.max() + 1)
+
+    grid_x, grid_y = np.meshgrid(x_unique, y_unique)
+
+    # 5. Row bounds (for masking)
+    row_ids = adata.obs["array_row"].values[in_tissue].astype(int)
+    col_ids = adata.obs["array_col"].values[in_tissue].astype(int)
+
+    row_bounds = {}
+    for r in np.unique(row_ids):
+        cols = col_ids[row_ids == r]
+        row_bounds[r] = (cols.min(), cols.max())
+
+    # 6. Expression matrix
+    X = adata.X
+    if not isinstance(X, np.ndarray):
+        X = X.toarray()
+
+    if log1p:
+        X = np.log1p(X)
+
+    # 7. Generate mask
+    tissue_mask = np.ones(grid_x.shape, dtype=np.float32)
+    for i, y_val in enumerate(y_unique):
+        row_est = int(np.round(y_val / np.sqrt(3)))
+
+        if row_est not in row_bounds:
+            tissue_mask[i, :] = 0
+            continue
+
+        xmin, xmax = row_bounds[row_est]
+        outside = (x_unique < xmin) | (x_unique > xmax)
+        tissue_mask[i, outside] = 0
+
+    valid_pixels = np.sum(tissue_mask)
+
+    # 7. Generate gene images
+    gene_images = []
+    kept_genes = []
+
+    points = np.vstack((x, y)).T
+
+    for g_idx, gene in enumerate(genes):
+        values = X[in_tissue, g_idx]
+
+        # Skip low-expression genes
+        if min_expression > 0 and values.sum() <= min_expression:
+            continue
+
+        # Interpolation
+        img = griddata(points, values, (grid_x, grid_y), method=method, fill_value=0)
+        non_zero_ratio = np.sum(img > 0) / valid_pixels
+        if non_zero_ratio < min_nonzero_pixel_ratio:
+            continue
+        gene_images.append(img)
+        kept_genes.append(gene)
+
+    gene_images = np.array(gene_images)
+    kept_genes = np.array(kept_genes)
+
+    print(f"Kept {len(kept_genes)} genes after filtering")
+
+    # 9. save
+    inputs = [sample_id, tissue_mask, kept_genes, gene_images]
+
+    out = os.path.join(output_directory, f"{sample_id}_input_data.pkl")
+
+    with open(out, "wb") as f:
+        pickle.dump(inputs, f)
+
+    print("Saved:", out)
+
+    # return inputs
 
 
 def extract_sample_ion_image(sample_path_list, sample_id_list, target_mz, ppm_torelance, shape_mask_list,
@@ -518,10 +941,13 @@ if __name__ == '__main__':
     output_dir = r'E:\yangjun\msi\MSI_IIE_article\ad_whole_brain_pre'
 
     import pandas as pd
-    identified_pos = pd.read_excel(r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\2.定性结果\Qualitative.xlsx', sheet_name='pos')
+
+    identified_pos = pd.read_excel(
+        r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\2.定性结果\Qualitative.xlsx', sheet_name='pos')
     pos_mz = identified_pos['mz'].astype(float).tolist()
     pos_name = identified_pos['Metabolites'].astype(str).tolist()
-    identified_neg = pd.read_excel(r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\2.定性结果\Qualitative.xlsx', sheet_name='neg')
+    identified_neg = pd.read_excel(
+        r'G:\ad_msi_data_ouyi\LM2025M1005W-张登峰-空间代谢组-项目报告\2.定性结果\Qualitative.xlsx', sheet_name='neg')
     neg_mz = identified_neg['mz'].astype(float).tolist()
     neg_name = identified_neg['Metabolites'].astype(str).tolist()
     get_samples_ion_images(sample_path_list=sample_path_list,
@@ -532,4 +958,3 @@ if __name__ == '__main__':
                            output_directory=output_dir,
                            target_mz_list=[neg_mz, pos_mz, neg_mz, pos_mz],
                            target_mz_name=[neg_name, pos_name, neg_name, pos_name])
-

@@ -244,12 +244,11 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_p
     # k-means clustering
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     cluster_labels = kmeans.fit_predict(pca_results) + 1  # shape: (total_ions,)
-
     # 4. Plots for samples and clusters
-    plt.figure(figsize=(4, 7.5))
+    plt.figure(figsize=(8, 4))
 
     # Plot 1:
-    plt.subplot(2, 1, 1)
+    plt.subplot(1, 2, 1)
     unique_samples = list(set(sample_ids))
     palette = sns.color_palette("husl", len(file_list))
     color_map = {sample: palette[i] for i, sample in enumerate(file_list)}
@@ -292,9 +291,9 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_p
     plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.2f})")
 
     # Plot 2:
-    plt.subplot(2, 1, 2)
+    plt.subplot(1, 2, 2)
     cluster_palette = sns.color_palette("husl", n_clusters)
-    cluster_colors = [cluster_palette[label] for label in cluster_labels]
+    cluster_colors = [cluster_palette[label - 1] for label in cluster_labels]
 
     plt.scatter(
         pca_results[:, 0],
@@ -308,7 +307,7 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_p
     centers = kmeans.cluster_centers_
     # plt.scatter(centers[:, 0], centers[:, 1], c='black', s=200, alpha=0.8, marker='X')
     for i, center in enumerate(centers):
-        plt.text(center[0], center[1], str(i), fontsize=12, ha='center', va='center', color='black')
+        plt.text(center[0], center[1], str(i + 1), fontsize=12, ha='center', va='center', color='black')
 
     plt.xlabel(f"PC1 (Variance: {pca.explained_variance_ratio_[0]:.2f})")
     plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.2f})")
@@ -321,7 +320,7 @@ def multi_files_pca_kmeans(outputs_final, file_list=None, n_clusters=8, output_p
     return pca_results, sample_ids, mz_values, cluster_labels
 
 
-def single_files_pca_kmeans(outputs_final, display_file, file_list=None, n_clusters=8, output_path=None):
+def single_files_pca_kmeans(outputs_final, display_file, file_list=None, n_clusters=8, label_map=None, output_path=None):
     if file_list is None:
         file_list = [i[0] for i in outputs_final]
         temp_outputs = outputs_final
@@ -358,6 +357,8 @@ def single_files_pca_kmeans(outputs_final, display_file, file_list=None, n_clust
     # k-means clustering (apply on one file)
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     cluster_labels = kmeans.fit_predict(pca_single) + 1  # shape: (total_ions,)
+    if label_map is not None:
+        cluster_labels = np.array([label_map.get(x, x) for x in cluster_labels])
 
     # 4. Plots for samples and clusters
     plt.figure(figsize=(3.5, 3.5))
@@ -387,7 +388,8 @@ def single_files_pca_kmeans(outputs_final, display_file, file_list=None, n_clust
     centers = kmeans.cluster_centers_
     # plt.scatter(centers[:, 0], centers[:, 1], c='black', s=200, alpha=0.8, marker='X')
     for i, center in enumerate(centers, start=1):
-        plt.text(center[0], center[1], str(i), fontsize=10, ha='center', va='center', color='black')
+        display_label = label_map.get(i, i) if label_map else i
+        plt.text(center[0], center[1], str(display_label), fontsize=10, ha='center', va='center', color='black')
 
     plt.xlabel(f"PC1 (Variance: {pca.explained_variance_ratio_[0]:.2f})")
     plt.ylabel(f"PC2 (Variance: {pca.explained_variance_ratio_[1]:.2f})")
@@ -482,7 +484,7 @@ def single_cluster_visualization(original_inputs, sample_ids, cluster_labels, di
     import math
     n_rows = math.ceil(n_plots / n_cols)
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.3 * n_cols, 3.3 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(2.8 * n_cols, 2.8 * n_rows))
     if n_rows == 1 and n_cols == 1:
         axes = [axes]
     else:
@@ -811,7 +813,7 @@ def two_classes_davies_bouldin(
             continue
 
         db_index = (S1 + S2) / M12
-        result.append((mz, db_index))
+        result.append((mz, db_index, (S1 + S2) / 2, M12))
 
     return result
 
@@ -846,7 +848,7 @@ def plot_similarity_bar(sorted_similarity_results, top_k=None, figsize=(12, 6)):
     plt.show()
 
 
-def single_mz_visualization(original_inputs, sample_list, plot_mz):
+def single_mz_visualization(original_inputs, sample_list, plot_mz, ppm, output_path=None):
     """
 
     :param original_inputs:
@@ -861,7 +863,7 @@ def single_mz_visualization(original_inputs, sample_list, plot_mz):
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
     axes = axes.flatten()  # 变成 1D 列表，方便索引
 
-    ppm = 10
+    # ppm = 10
     tolerance = plot_mz * ppm * 1e-6
 
     idx = 0
@@ -870,9 +872,12 @@ def single_mz_visualization(original_inputs, sample_list, plot_mz):
             for idj in range(len(s_input[2])):
                 mz = s_input[2][idj]
                 if plot_mz - tolerance < mz < plot_mz + tolerance:
+                    # print(mz)
                     ax = axes[idx]
-                    img = ax.imshow(s_input[3][idj], cmap='magma')
-                    ax.set_title(f"Sample: {s_input[0]} m/z: {mz}")
+                    img = ax.imshow(s_input[3][idj], cmap='viridis')
+                    # print(s_input[3][idj])
+                    ax.set_title(f"Sample: {s_input[0]} m/z: {mz:.4f}")
+                    ax.axis("off")
                     fig.colorbar(img, ax=ax, fraction=0.046, pad=0.04)
                     idx += 1
                     break
@@ -881,6 +886,8 @@ def single_mz_visualization(original_inputs, sample_list, plot_mz):
         axes[j].axis('off')
 
     plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.show()
 
 
